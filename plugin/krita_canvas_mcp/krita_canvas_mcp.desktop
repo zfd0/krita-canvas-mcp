@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=krita_canvas_mcp
+Name=Krita Canvas MCP

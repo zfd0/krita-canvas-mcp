@@ -1,0 +1,42 @@
+[project]
+name = "krita-canvas-mcp"
+version = "0.0.1"
+description = "MCP server exposing Krita as canvas tools for LLM-driven iterative painting"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+krita-canvas-mcp = "krita_canvas_mcp.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# src 布局：显式指定包路径，别用自动发现
+[tool.hatch.build.targets.wheel]
+packages = ["src/krita_canvas_mcp"]
+
+# 排除参考源码/插件/脚本，防止被打进 wheel
+[tool.hatch.build]
+exclude = [
+    "krita-6.0.4/",
+    "plugin/",
+    "scripts/",
+    "tests/",
+    "docs/",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

@@ -1,0 +1,1055 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Krita Canvas MCP 工具集（LibKis 封装）",
+  "version": "1.1.0",
+  "description": "将 Krita 通过 LibKis API 封装为 MCP 工具，由 LLM 基于画布快照闭环预测动作并调用执行，逐笔迭代完成对目标图像的过程重建。每个工具对象的 name/description/inputSchema 直接符合 MCP tools/list 规范。坐标一律为图像像素坐标（左上为原点）。所有绘画类工具默认 auto_sync=true，内部执行 waitForDone()+refreshProjection()，保证工具返回时画布合成已更新；闭环快照一致性依赖此行为。目标图是会话级概念，通过 set_target_image 设置，get_target_image / sample_color(source=target) / diff_with_target 均基于它。",
+  "categories": [
+    "观测/快照类：get_document_info, get_canvas_snapshot, get_node_pixels, get_node_tree, get_view_state, get_target_image, set_target_image, list_documents, list_channels, get_channel_pixels, get_selection_pixels, sample_color, diff_with_target, get_paint_progress, get_action_history, get_snapshot_hash, validate_canvas_target",
+    "绘画执行类：paint_line, paint_path, paint_shape, write_pixels, set_channel_pixels, check_paintability",
+    "笔刷/颜色配置类：list_resources, set_brush_preset, set_brush_params, set_colors, set_blending_mode, set_brush_flags",
+    "图层管理类：create_node, create_fill_layer, manage_node, set_node_props, transform_node",
+    "矢量类：vector_add_svg, vector_get_shapes, vector_shape_op, vector_export_svg",
+    "选区类：selection_op, set_selection_pixels",
+    "滤镜/变换类：apply_filter, get_filter_config, transform_document",
+    "动作/视图/同步类：execute_action, set_view_state, wait_for_done, undo, redo",
+    "调色板/设置类：extract_palette, get_palette, get_setting, set_setting",
+    "IO/生命周期/会话类：create_document, open_document, save_document, close_document, get_krita_info, get_session_state, abort_session"
+  ],
+  "tools": [
+    {
+      "name": "get_document_info",
+      "description": "获取当前文档元信息：尺寸、色彩模型、色深、配置文件、分辨率、是否已修改",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string", "description": "文档ID；缺省为活动文档" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_canvas_snapshot",
+      "description": "拍摄当前画布合成结果快照，返回PNG(base64)与快照哈希。这是闭环绘画的主观测通道",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" },
+          "region": {
+            "type": "object",
+            "description": "裁剪区域(图像坐标)；缺省为全图",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "max_side": { "type": "integer", "minimum": 64, "default": 1024, "description": "最长边像素限制，超出等比降采样以控制token" },
+          "include_alpha": { "type": "boolean", "default": false, "description": "false时以白色合成背景输出，便于目标图对比" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_node_pixels",
+      "description": "读取单个图层内容(非合成)，用于分析某一笔或某一层",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "region": {
+            "type": "object",
+            "description": "裁剪区域(图像坐标)；缺省为全图",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "max_side": { "type": "integer", "default": 1024 }
+        },
+        "required": ["node_id"]
+      }
+    },
+    {
+      "name": "get_node_tree",
+      "description": "获取图层树：名称/类型/id/可见性/透明度/混合模式/父子关系",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" },
+          "recursive": { "type": "boolean", "default": true }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_view_state",
+      "description": "读取视图状态(缩放/旋转/镜像/视口中心)与当前绘画参数(笔刷预设/大小/颜色)，供状态诊断",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "get_target_image",
+      "description": "获取当前会话的目标图像（由 set_target_image 设置）。闭环临摹的参照基准。返回PNG(base64)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "object",
+            "description": "裁剪区域(图像坐标)；缺省为全图",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "max_side": { "type": "integer", "minimum": 64, "default": 1024 },
+          "variant": { "enum": ["original", "gray", "edge", "palette_quantized"], "default": "original" },
+          "quantize_colors": { "type": "integer", "minimum": 2, "maximum": 32, "default": 8 },
+          "include_alpha": { "type": "boolean", "default": false }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "set_target_image",
+      "description": "设置当前会话的目标图像。这是闭环临摹的参照基准，get_target_image / sample_color(source=target) / diff_with_target 均基于它。可选在活动画布顶层叠加锁定参考层",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": { "type": "string", "description": "目标图像文件路径" },
+          "as_reference_layer": { "type": "boolean", "default": false, "description": "是否同时在活动画布顶层叠加参考层(锁定+降不透明度)" },
+          "reference_opacity": { "type": "integer", "minimum": 0, "maximum": 255, "default": 128, "description": "as_reference_layer=true 时参考层不透明度" },
+          "reference_position": {
+            "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer" },
+            "description": "[x,y] 参考层放置位置，缺省 (0,0)"
+          }
+        },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "list_documents",
+      "description": "枚举当前Krita打开的所有文档，用于多文档寻址(目标图/画布/参考层)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_modified": { "type": "boolean", "default": true },
+          "include_path": { "type": "boolean", "default": true }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "list_channels",
+      "description": "列出图层的全部通道(名称/可见性/bounds)，用于通道级操作寻址",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" }
+        },
+        "required": ["node_id"]
+      }
+    },
+    {
+      "name": "get_channel_pixels",
+      "description": "读取单个通道灰度图(如线稿alpha/版画单版)，返回PNG(base64)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "channel": { "type": "string", "description": "通道名，来自list_channels" },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer" },
+              "y": { "type": "integer" },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          }
+        },
+        "required": ["node_id", "channel"]
+      }
+    },
+    {
+      "name": "get_selection_pixels",
+      "description": "将当前选区输出为灰度蒙版PNG(0~255 selectedness)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer" },
+              "y": { "type": "integer" },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "sample_color",
+      "description": "从目标图/画布/图层采样颜色，返回多种色彩空间表示。AI调色的事实来源，防漂移",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": { "enum": ["target", "canvas", "node"], "default": "target" },
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 },
+          "node_id": { "type": "string", "description": "source=node时必填" },
+          "radius": { "type": "integer", "minimum": 0, "maximum": 256, "default": 0 },
+          "reduce": { "enum": ["mean", "median", "mode", "dominant"], "default": "median" },
+          "color_space": { "enum": ["srgb_hex", "srgb_255", "srgb_float", "lab", "hsv"], "default": "srgb_hex" },
+          "exclude_alpha_below": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
+          "multiple": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x": { "type": "integer", "minimum": 0 },
+                "y": { "type": "integer", "minimum": 0 },
+                "label": { "type": "string" }
+              },
+              "required": ["x", "y"]
+            },
+            "maxItems": 16
+          }
+        },
+        "required": [],
+        "allOf": [
+          {
+            "if": { "properties": { "source": { "const": "node" } } },
+            "then": { "required": ["node_id"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "diff_with_target",
+      "description": "计算画布与目标图的差异，返回标量指标(mae/rmse/psnr/ssim/delta_e)+热点+可选热力图。闭环决策与终止判断的核心输入",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "max_side": { "type": "integer", "minimum": 64, "default": 768 },
+          "mode": { "enum": ["abs", "perceptual"], "default": "perceptual" },
+          "include_heatmap": { "type": "boolean", "default": true },
+          "include_by_region": { "type": "boolean", "default": true },
+          "top_k_hotspots": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_paint_progress",
+      "description": "统计画布相对基线的推进：已覆盖/未触及/上轮变化，返回区域级覆盖度与停滞检测。阶段切换依据",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "against": { "enum": ["target", "empty", "last_stage_end", "last_action"], "default": "target" },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "max_side": { "type": "integer", "minimum": 64, "default": 768 },
+          "include_mask": { "type": "boolean", "default": false },
+          "include_by_region": { "type": "boolean", "default": true },
+          "recent_rounds": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_action_history",
+      "description": "拉取最近的绘画动作记录，供LLM感知自身决策轨迹，防原地打转与遗忘",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "last_n": { "type": "integer", "minimum": 1, "maximum": 200, "default": 10 },
+          "since_iteration": { "type": "integer", "minimum": 0 },
+          "since_stage": { "enum": ["A", "B", "C", "D"], "description": "缺省不过滤；指定时返回该阶段以来的动作" },
+          "format": { "enum": ["full", "summary", "stats_only"], "default": "summary" },
+          "filter_action": { "type": "array", "items": { "type": "string" }, "description": "只返回指定动作类型，如['paint_path','set_colors']" },
+          "include_failed": { "type": "boolean", "default": false }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_snapshot_hash",
+      "description": "获取当前画布合成结果的哈希值，用于判断画布是否变化，避免重复送LLM。注意：get_canvas_snapshot 返回的 meta 里也已包含此 hash，此工具仅在需要独立查询时使用",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" },
+          "algorithm": { "enum": ["md5", "sha1", "perceptual"], "default": "perceptual" },
+          "region": {
+            "type": "object",
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["x", "y", "width", "height"]
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "validate_canvas_target",
+      "description": "校验画布与目标图尺寸/色彩模型是否匹配(坐标一一对应的前提)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" },
+          "strict": { "type": "boolean", "default": true, "description": "true时尺寸/色彩模型必须完全一致；false时只警告" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "paint_line",
+      "description": "用当前笔刷在两点间绘制一条直线，可带首尾压感。适合轮廓/排线。绘制后自动同步投影",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string", "description": "目标图层；缺省为活动图层" },
+          "x1": { "type": "number" },
+          "y1": { "type": "number" },
+          "x2": { "type": "number" },
+          "y2": { "type": "number" },
+          "pressure1": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
+          "pressure2": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
+          "stroke_style": { "enum": ["ForegroundColor", "BackgroundColor", "None"], "default": "ForegroundColor" },
+          "auto_sync": { "type": "boolean", "default": true }
+        },
+        "required": ["x1", "y1", "x2", "y2"]
+      }
+    },
+    {
+      "name": "paint_path",
+      "description": "用当前笔刷沿折线/贝塞尔路径绘制自由笔画。折线顶点由LLM预测，主导闭环绘画。注意：smooth=true 时建议 ≤32 个顶点(贝塞尔插值在密集点上会失真且慢)；smooth=false 时可到 256 点",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "points": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 256,
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": { "type": "number" },
+              "description": "[x, y] 或 [x, y, pressure]"
+            }
+          },
+          "smooth": { "type": "boolean", "default": true, "description": "true时按贝塞尔平滑插值(建议 ≤32 点)，false时逐段直线" },
+          "closed": { "type": "boolean", "default": false },
+          "stroke_style": { "enum": ["ForegroundColor", "BackgroundColor", "None"], "default": "ForegroundColor" },
+          "fill_style": { "enum": ["None", "ForegroundColor", "BackgroundColor", "Pattern"], "default": "None" },
+          "auto_sync": { "type": "boolean", "default": true }
+        },
+        "required": ["points"]
+      }
+    },
+    {
+      "name": "paint_shape",
+      "description": "绘制椭圆/矩形/多边形色块(可选描边+填充)，用于大色块铺底",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "shape": { "enum": ["ellipse", "rectangle", "polygon"] },
+          "rect": {
+            "type": "object",
+            "description": "shape为ellipse/rectangle时必填",
+            "properties": {
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "width": { "type": "number" },
+              "height": { "type": "number" }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "points": {
+            "type": "array",
+            "minItems": 3,
+            "description": "shape为polygon时必填",
+            "items": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } }
+          },
+          "stroke_style": { "enum": ["ForegroundColor", "BackgroundColor", "None"], "default": "None" },
+          "fill_style": { "enum": ["None", "ForegroundColor", "BackgroundColor", "Pattern"], "default": "ForegroundColor" },
+          "auto_sync": { "type": "boolean", "default": true }
+        },
+        "required": ["shape"],
+        "allOf": [
+          { "if": { "properties": { "shape": { "const": "polygon" } } }, "then": { "required": ["points"] } },
+          { "if": { "properties": { "shape": { "enum": ["ellipse", "rectangle"] } } }, "then": { "required": ["rect"] } }
+        ]
+      }
+    },
+    {
+      "name": "write_pixels",
+      "description": "将LLM生成的像素补丁(RGBA PNG/base64)直接写入图层指定区域，用于精细重建，绕开笔画近似",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 },
+          "width": { "type": "integer", "minimum": 1, "description": "补丁宽度，必须与图片一致" },
+          "height": { "type": "integer", "minimum": 1 },
+          "image_b64": { "type": "string", "contentEncoding": "base64", "description": "RGBA PNG编码" },
+          "blend_mode": { "enum": ["overwrite", "alpha_composite"], "default": "overwrite", "description": "overwrite整体替换；alpha_composite按alpha与原图层合成" },
+          "auto_sync": { "type": "boolean", "default": true }
+        },
+        "required": ["x", "y", "width", "height", "image_b64"]
+      }
+    },
+    {
+      "name": "set_channel_pixels",
+      "description": "将灰度补丁(PNG/base64)写入单个通道",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "channel": { "type": "string" },
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "image_b64": { "type": "string", "contentEncoding": "base64", "description": "单通道灰度PNG，尺寸即补丁尺寸" }
+        },
+        "required": ["node_id", "channel", "x", "y", "image_b64"]
+      }
+    },
+    {
+      "name": "check_paintability",
+      "description": "检查图层能否被当前笔刷绘制(返回VECTOR/CLONE/PAINT/UNPAINTABLE/MYPAINTBRUSH_UNPAINTABLE)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" }
+        },
+        "required": ["node_id"]
+      }
+    },
+    {
+      "name": "list_resources",
+      "description": "枚举可用资源：brush(笔刷)/preset(笔刷预设)/pattern/gradient/palette/workspace",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resource_type": { "enum": ["brush", "preset", "pattern", "gradient", "palette", "workspace"] },
+          "filter": { "type": "string", "description": "名称子串过滤" }
+        },
+        "required": ["resource_type"]
+      }
+    },
+    {
+      "name": "set_brush_preset",
+      "description": "激活指定笔刷预设；后续paint_*均使用该预设",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "preset_name": { "type": "string", "description": "来自list_resources(preset)" },
+          "resource_type": { "enum": ["preset", "brush"], "default": "preset" }
+        },
+        "required": ["preset_name"]
+      }
+    },
+    {
+      "name": "set_brush_params",
+      "description": "一次设置多个绘画参数(大小/不透明度/流量/旋转/图案尺寸)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "size": { "type": "number", "exclusiveMinimum": 0, "description": "像素" },
+          "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "flow": { "type": "number", "minimum": 0, "maximum": 1 },
+          "rotation": { "type": "number", "minimum": -360, "maximum": 360, "description": "度" },
+          "pattern_size": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "set_colors",
+      "description": "设置前景/背景色(0.0~1.0浮点或0~255整数)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "foreground": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" }, "description": "[r,g,b] 或 [r,g,b,a]" },
+          "background": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" } }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "set_blending_mode",
+      "description": "设置画笔混合模式(view级)或图层混合模式(node级)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string", "description": "如 normal/multiply/screen/overlay/erase" },
+          "scope": { "enum": ["brush", "node"], "default": "brush" },
+          "node_id": { "type": "string", "description": "scope=node时必填" }
+        },
+        "required": ["mode"],
+        "allOf": [
+          {
+            "if": { "properties": { "scope": { "const": "node" } } },
+            "then": { "required": ["node_id"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "set_brush_flags",
+      "description": "橡皮模式/锁定透明像素/禁用压感开关",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "eraser_mode": { "type": "boolean" },
+          "global_alpha_lock": { "type": "boolean" },
+          "disable_pressure": { "type": "boolean" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "create_node",
+      "description": "创建图层/蒙版并挂到指定父节点",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "node_type": { "enum": ["paintlayer", "grouplayer", "filelayer", "filterlayer", "filllayer", "clonelayer", "vectorlayer", "transparencymask", "filtermask", "transformmask", "selectionmask", "colorizemask"] },
+          "parent_id": { "type": "string", "description": "缺省为root" },
+          "above_id": { "type": "string", "description": "插入到该节点上方；缺省置顶" },
+          "file_path": { "type": "string", "description": "filelayer类型必填" },
+          "fill_color": { "type": "array", "items": { "type": "number" }, "description": "paintlayer/colorizemask可选初始填充[r,g,b,a]" },
+          "set_active": { "type": "boolean", "default": true }
+        },
+        "required": ["name", "node_type"],
+        "allOf": [
+          {
+            "if": { "properties": { "node_type": { "const": "filelayer" } } },
+            "then": { "required": ["file_path"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "create_fill_layer",
+      "description": "创建整层纯色/图案填充，用于快速铺底",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "color": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" } },
+          "pattern_name": { "type": "string", "description": "与color二选一" },
+          "parent_id": { "type": "string" }
+        },
+        "oneOf": [ { "required": ["color"] }, { "required": ["pattern_name"] } ]
+      }
+    },
+    {
+      "name": "manage_node",
+      "description": "节点操作：删除/复制/向下合并/平移/重排/设为活动",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "op": { "enum": ["remove", "duplicate", "merge_down", "move", "set_active", "reorder"] },
+          "x": { "type": "integer", "description": "op=move时目标坐标" },
+          "y": { "type": "integer" },
+          "above_id": { "type": "string", "description": "op=reorder时，插入到该节点上方" },
+          "new_name": { "type": "string", "description": "op=duplicate时可指定副本名" }
+        },
+        "required": ["node_id", "op"],
+        "allOf": [
+          {
+            "if": { "properties": { "op": { "const": "move" } } },
+            "then": { "required": ["x", "y"] }
+          },
+          {
+            "if": { "properties": { "op": { "const": "reorder" } } },
+            "then": { "required": ["above_id"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "set_node_props",
+      "description": "批量设置图层属性：名称/可见/锁定/不透明度(0~255)/混合模式/锁定alpha/继承alpha",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string", "description": "缺省为活动图层" },
+          "name": { "type": "string" },
+          "visible": { "type": "boolean" },
+          "locked": { "type": "boolean" },
+          "opacity": { "type": "integer", "minimum": 0, "maximum": 255 },
+          "blending_mode": { "type": "string" },
+          "alpha_locked": { "type": "boolean" },
+          "inherit_alpha": { "type": "boolean" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "transform_node",
+      "description": "图层几何变换：缩放(7种重采样策略)/旋转/斜切/裁剪",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "op": { "enum": ["scale", "rotate", "shear", "crop"] },
+          "width": { "type": "integer", "description": "op=scale必填" },
+          "height": { "type": "integer", "description": "op=scale必填" },
+          "angle": { "type": "number", "description": "op=rotate弧度 / op=shear度数" },
+          "angle_y": { "type": "number", "description": "op=shear的Y角度" },
+          "crop_region": {
+            "type": "object",
+            "description": "op=crop必填",
+            "properties": {
+              "x": { "type": "integer" },
+              "y": { "type": "integer" },
+              "width": { "type": "integer" },
+              "height": { "type": "integer" }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "strategy": { "enum": ["Hermite", "Bicubic", "Box", "Bilinear", "Bell", "BSpline", "Lanczos3", "Mitchell"], "default": "Bicubic" }
+        },
+        "required": ["node_id", "op"],
+        "allOf": [
+          {
+            "if": { "properties": { "op": { "const": "scale" } } },
+            "then": { "required": ["width", "height"] }
+          },
+          {
+            "if": { "properties": { "op": { "const": "crop" } } },
+            "then": { "required": ["crop_region"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "vector_add_svg",
+      "description": "把SVG路径加入矢量图层。LLM对几何目标图可直接预测SVG而非笔画(坐标单位:pt,即1/72英寸)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "svg": { "type": "string", "description": "SVG字符串" },
+          "group_name": { "type": "string", "description": "可选:将新增形状编组命名" }
+        },
+        "required": ["node_id", "svg"]
+      }
+    },
+    {
+      "name": "vector_get_shapes",
+      "description": "枚举矢量图层的形状(名称/类型/序号/bbox/变换矩阵/可见性/选中态)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" }
+        },
+        "required": ["node_id"]
+      }
+    },
+    {
+      "name": "vector_shape_op",
+      "description": "矢量形状操作。Shape无UUID，用shape_index(来自vector_get_shapes)寻址",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "shape_index": { "type": "integer", "minimum": 0, "description": "除op=group外必填" },
+          "op": { "enum": ["remove", "select", "deselect", "set_visible", "set_position", "set_transform", "set_zindex", "group"] },
+          "position": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+          "matrix": { "type": "array", "minItems": 6, "maxItems": 6, "items": { "type": "number" }, "description": "QTransform矩阵6元素[m11,m12,m21,m22,dx,dy]" },
+          "z_index": { "type": "integer" },
+          "visible": { "type": "boolean" },
+          "group_name": { "type": "string", "description": "op=group时的新组名" },
+          "group_with": { "type": "array", "items": { "type": "integer" }, "description": "op=group时合并的shape_index列表" }
+        },
+        "required": ["node_id", "op"],
+        "allOf": [
+          {
+            "if": { "properties": { "op": { "enum": ["remove", "select", "deselect", "set_visible", "set_position", "set_transform", "set_zindex"] } } },
+            "then": { "required": ["shape_index"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "vector_export_svg",
+      "description": "导出图层为SVG字符串(便于LLM审阅当前矢量内容)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string" },
+          "shape_index": { "type": "integer", "description": "缺省导出整层" }
+        },
+        "required": ["node_id"]
+      }
+    },
+    {
+      "name": "selection_op",
+      "description": "选区操作：创建矩形选/全选/清除/反选/羽化/收缩/扩展/平滑/形态学/布尔运算。任意形状选区走 set_selection_pixels",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "op": { "enum": ["select_rect", "select_all", "clear", "invert", "feather", "grow", "shrink", "smooth", "border", "erode", "dilate", "move", "resize"] },
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "width": { "type": "integer" },
+          "height": { "type": "integer" },
+          "value": { "type": "integer", "minimum": 0, "maximum": 255, "default": 255, "description": "选区强度" },
+          "radius": { "type": "integer", "description": "feather/grow/shrink/border/erode/dilate用" },
+          "node_ref": { "type": "string", "description": "select_all作用于的node_id" }
+        },
+        "required": ["op"],
+        "allOf": [
+          {
+            "if": { "properties": { "op": { "enum": ["select_rect", "move", "resize"] } } },
+            "then": { "required": ["x", "y", "width", "height"] }
+          },
+          {
+            "if": { "properties": { "op": { "enum": ["feather", "grow", "shrink", "border", "erode", "dilate"] } } },
+            "then": { "required": ["radius"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "set_selection_pixels",
+      "description": "将LLM预测的灰度蒙版(0~255 selectedness)写入并激活为文档选区",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "image_b64": { "type": "string", "contentEncoding": "base64", "description": "灰度PNG" },
+          "apply_to_document": { "type": "boolean", "default": true }
+        },
+        "required": ["x", "y", "image_b64"]
+      }
+    },
+    {
+      "name": "apply_filter",
+      "description": "对图层/选区应用滤镜(先list_only=true枚举全部已注册滤镜)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "list_only": { "type": "boolean", "default": false, "description": "true时仅返回滤镜名列表" },
+          "filter_name": { "type": "string" },
+          "node_id": { "type": "string" },
+          "config": { "type": "object", "description": "滤镜参数键值对(如radius/amount)" },
+          "as_filter_layer": { "type": "boolean", "default": false, "description": "非破坏性滤镜层" }
+        },
+        "required": [],
+        "anyOf": [
+          { "required": ["filter_name"] },
+          { "properties": { "list_only": { "const": true } }, "required": ["list_only"] }
+        ]
+      }
+    },
+    {
+      "name": "get_filter_config",
+      "description": "读取滤镜默认配置模板，供LLM参照调参后调用apply_filter",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "filter_name": { "type": "string" }
+        },
+        "required": ["filter_name"]
+      }
+    },
+    {
+      "name": "transform_document",
+      "description": "整幅文档变换：缩放/旋转/斜切/裁剪/调整画布",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "op": { "enum": ["scale", "rotate", "shear", "crop", "resize"] },
+          "width": { "type": "integer" },
+          "height": { "type": "integer" },
+          "x_res": { "type": "number" },
+          "y_res": { "type": "number" },
+          "angle": { "type": "number" },
+          "angle_y": { "type": "number" },
+          "region": {
+            "type": "object",
+            "description": "op=crop必填",
+            "properties": { "x": { "type": "integer" }, "y": { "type": "integer" }, "width": { "type": "integer" }, "height": { "type": "integer" } },
+            "required": ["x", "y", "width", "height"]
+          },
+          "strategy": { "enum": ["Hermite", "Bicubic", "Box", "Bilinear", "Bell", "BSpline", "Lanczos3", "Mitchell"], "default": "Bicubic" }
+        },
+        "required": ["op"],
+        "allOf": [
+          {
+            "if": { "properties": { "op": { "const": "crop" } } },
+            "then": { "required": ["region"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "execute_action",
+      "description": "触发任意Krita内建动作(万能通道)。常用:edit_undo/edit_redo/clear/flatten_image/select_all",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action_name": { "type": "string" },
+          "list_only": { "type": "boolean", "default": false, "description": "true时返回全部可用动作名" }
+        },
+        "required": [],
+        "anyOf": [
+          { "required": ["action_name"] },
+          { "properties": { "list_only": { "const": true } }, "required": ["list_only"] }
+        ]
+      }
+    },
+    {
+      "name": "set_view_state",
+      "description": "设置视图：缩放/平移/旋转/镜像/重置(HUD对齐用)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "zoom": { "type": "number", "exclusiveMinimum": 0 },
+          "rotation": { "type": "number", "minimum": -360, "maximum": 360 },
+          "mirror": { "type": "boolean" },
+          "center_to": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" }, "description": "[x,y] 图像像素置于视口中心" },
+          "reset_view": { "type": "boolean", "default": false }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "wait_for_done",
+      "description": "阻塞至所有后台笔刷任务完成并刷新投影合成，确保下次快照为最新画面。绘画工具默认 auto_sync=true 时会内部调用此逻辑，本工具仅在需要显式控制时使用",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "refresh_projection": { "type": "boolean", "default": true },
+          "timeout_ms": { "type": "integer", "default": 60000 }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "undo",
+      "description": "撤销上一步绘画操作(支持多步)。闭环迭代的核心纠错通道",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "steps": { "type": "integer", "minimum": 1, "default": 1 },
+          "flush_before": { "type": "boolean", "default": true, "description": "先waitForDone再撤销，避免异步笔画导致撤销错位" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "redo",
+      "description": "重做被撤销的操作",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "steps": { "type": "integer", "minimum": 1, "default": 1 }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "extract_palette",
+      "description": "从文档合成画面量化抽取主色(并可写入调色板资源)。取色指导重建",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" },
+          "node_id": { "type": "string", "description": "与document_id二选一，指定图层" },
+          "max_colors": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
+          "quantize_algorithm": { "enum": ["kmeans", "median_cut"], "default": "kmeans" },
+          "save_as_palette": { "type": "string", "description": "可选:保存为调色板名" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_palette",
+      "description": "读取指定调色板的色值列表，用于 LLM 侧与 Krita 侧调色板对账",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "调色板名，来自 list_resources(palette)" }
+        },
+        "required": ["name"]
+      }
+    },
+    {
+      "name": "get_setting",
+      "description": "读取插件持久化设置(如阈值/默认笔刷等用户配置)。注意：会话状态(当前 stage / plan / iteration)请用 get_session_state，不要存这里",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group": { "type": "string", "default": "krita_canvas_mcp" },
+          "name": { "type": "string" },
+          "default_value": { "type": "string" }
+        },
+        "required": ["name"]
+      }
+    },
+    {
+      "name": "set_setting",
+      "description": "写入插件持久化设置。注意：会话状态(当前 stage / plan / iteration)请用会话级工具管理，不要存这里",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group": { "type": "string", "default": "krita_canvas_mcp" },
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "required": ["name", "value"]
+      }
+    },
+    {
+      "name": "create_document",
+      "description": "新建画布(含指定色彩模型/色深/ICC/分辨率)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 },
+          "name": { "type": "string", "default": "painting" },
+          "color_model": { "enum": ["A", "RGBA", "XYZA", "LABA", "CMYKA", "GRAYA", "YCbCrA"], "default": "RGBA" },
+          "color_depth": { "enum": ["U8", "U16", "F16", "F32"], "default": "U8" },
+          "profile": { "type": "string", "default": "" },
+          "resolution": { "type": "number", "default": 300 },
+          "background": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" }, "description": "可选初始背景色" }
+        },
+        "required": ["width", "height"]
+      }
+    },
+    {
+      "name": "open_document",
+      "description": "打开图像文件为新文档。若该文件要用作闭环临摹的目标图，请随后调用 set_target_image；若要在现有画布上叠加参考层，请用 create_node(node_type=filelayer)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": { "type": "string" }
+        },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "save_document",
+      "description": "保存/另存/导出(支持PNG配置alpha/压缩/sRGB等)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": { "enum": ["save", "save_as", "export"], "default": "export" },
+          "file_path": { "type": "string", "description": "save_as/export必填" },
+          "format": { "enum": ["png", "jpeg", "kra"], "default": "png" },
+          "png_config": {
+            "type": "object",
+            "properties": {
+              "alpha": { "type": "boolean", "default": true },
+              "compression": { "type": "integer", "minimum": 1, "maximum": 9, "default": 6 },
+              "force_srgb": { "type": "boolean", "default": false }
+            }
+          },
+          "jpeg_config": { "type": "object", "properties": { "quality": { "type": "integer", "minimum": 0, "maximum": 100, "default": 90 } } },
+          "node_id": { "type": "string", "description": "仅导出指定图层" }
+        },
+        "required": [],
+        "allOf": [
+          {
+            "if": { "properties": { "mode": { "enum": ["save_as", "export"] } } },
+            "then": { "required": ["file_path"] }
+          }
+        ]
+      }
+    },
+    {
+      "name": "close_document",
+      "description": "关闭文档(不提示保存)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_id": { "type": "string" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_krita_info",
+      "description": "Krita版本/批处理模式/可用工具清单",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "get_session_state",
+      "description": "读取当前绘画会话的完整状态：目标图、画布、当前阶段、迭代计数、L0 规划、阶段目标、跨阶段遗留问题、停滞检测。引导层核心状态查询入口",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_history_summary": { "type": "boolean", "default": false, "description": "true 时附带动作的分类统计" }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "abort_session",
+      "description": "终止当前绘画会话，清理缓存与状态。用户中断或目标图换错时使用",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "save_partial": { "type": "boolean", "default": true, "description": "是否保存当前部分结果到文件" },
+          "keep_canvas": { "type": "boolean", "default": true, "description": "false时清空画布回到初始状态" }
+        },
+        "required": []
+      }
+    }
+  ]
+}
