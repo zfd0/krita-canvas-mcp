@@ -59,7 +59,7 @@ class Dispatcher(QObject):
                 except Exception as e:
                     traceback.print_exc()
                     box["result"] = {"ok": False, "err_code": "IO_ERROR",
-                                     "message": str(e)}
+                                     "message": f"{type(e).__name__}: {e}"}
                 finally:
                     event.set()
         except Empty:

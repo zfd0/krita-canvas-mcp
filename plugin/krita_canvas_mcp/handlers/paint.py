@@ -16,17 +16,24 @@ def _active_doc(params: dict):
     return doc
 
 
-def _resolve_node(doc, node_id):
-    """按 node_id（uuid 或名称）定位节点；为空则取活动节点。"""
+def _resolve_node(doc, node_id, required=True):
+    n = None
     if not node_id:
-        return doc.activeNode()
-    try:
-        n = doc.nodeByUniqueID(node_id)
-        if n is not None:
-            return n
-    except Exception:
-        pass
-    return doc.nodeByName(node_id)
+        n = doc.activeNode()
+        if n is None:
+            children = doc.rootNode().childNodes()
+            if children:
+                n = children[0]
+    else:
+        try:
+            n = doc.nodeByUniqueID(node_id)
+        except Exception:
+            n = None
+        if n is None:
+            n = doc.nodeByName(node_id)
+    if n is None and required:
+        raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id!r}")
+    return n
 
 
 def _style(s):
@@ -117,7 +124,7 @@ def _image_from_b64(b64: str) -> QImage:
     img = QImage.fromData(QByteArray(raw), "PNG")
     if img.isNull():
         raise RuntimeError("INVALID_PARAM: 图片解码失败")
-    return img.convertToFormat(QImage.Format_ARGB32)
+    return img.convertToFormat(QImage.Format.Format_ARGB32)
 
 
 def write_pixels(params: dict) -> dict:
@@ -132,7 +139,7 @@ def write_pixels(params: dict) -> dict:
     # PyQt6 下用 bits().asstring() 一次性取整块内存，兼容性好于逐行 scanLine
     line = img.bytesPerLine()
     need = img.width() * 4
-    raw = img.bits().asstring(img.byteCount())
+    raw = img.bits().asstring(img.sizeInBytes())
     data = b"".join(
         raw[i * line:i * line + need] for i in range(img.height())
     )

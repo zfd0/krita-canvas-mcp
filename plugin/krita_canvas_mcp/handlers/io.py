@@ -14,7 +14,6 @@ def _app():
 # ---------------------------------------------------------------- 文档生命周期
 
 def create_document(params: dict) -> dict:
-    """新建画布并展示（成为活动文档）。"""
     app = _app()
     doc = app.createDocument(
         int(params.get("width", 512)),
@@ -30,6 +29,16 @@ def create_document(params: dict) -> dict:
     if win is not None:
         win.addView(doc)
     app.setActiveDocument(doc)
+
+    # ★ 关键：显式激活首个可绘制节点，避免后续 activeNode() 返回 None
+    root = doc.rootNode()
+    children = root.childNodes() if root else []
+    if children:
+        try:
+            doc.setActiveNode(children[0])
+        except Exception:
+            pass
+    doc.refreshProjection()
     return {"document_id": doc.fileName() or f"untitled_{id(doc)}",
             "name": params.get("name", "untitled"),
             "width": doc.width(), "height": doc.height()}

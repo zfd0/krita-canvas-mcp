@@ -11,9 +11,16 @@ def _active_view():
     """取活动视图；无窗口时报错。"""
     app = Krita.instance()
     win = app.activeWindow()
-    if win is None or win.activeView() is None:
-        raise RuntimeError("NO_ACTIVE_DOCUMENT")
-    return win.activeView()
+    if win is None:
+        raise RuntimeError("NO_ACTIVE_DOCUMENT: 无窗口")
+    view = win.activeView()
+    if view is None:
+        # 兜底：取第一个视图
+        views = win.views()
+        view = views[0] if views else None
+    if view is None:
+        raise RuntimeError("NO_ACTIVE_DOCUMENT: 无视图，请先 create_document")
+    return view
 
 
 def _parse_color(value) -> tuple:
@@ -223,16 +230,17 @@ def sample_color(params: dict) -> dict:
     if doc is None:
         raise RuntimeError("NO_ACTIVE_DOCUMENT")
 
-    x, y = int(params["x"]), int(params["y"])
+    x = int(params.get("x", 0))
+    y = int(params.get("y", 0))
     radius = int(params.get("radius", 0))
     reduce = params.get("reduce", "median")
 
     img = doc.projection(x - radius, y - radius, radius * 2 + 1, radius * 2 + 1)
-    img = img.convertToFormat(QImage.Format_RGB32)  # 内存字节序 BGRA
+    img = img.convertToFormat(QImage.Format.Format_RGB32)  # 内存字节序 BGRA
     w, h = img.width(), img.height()
     pixels = []
     line = img.bytesPerLine()
-    raw = img.bits().asstring(img.byteCount())  # PyQt6: 整块内存一次性取出
+    raw = img.bits().asstring(img.sizeInBytes())  # PyQt6: 整块内存一次性取出
     for i in range(h):
         for j in range(w):
             off = i * line + j * 4

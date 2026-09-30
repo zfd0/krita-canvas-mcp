@@ -15,16 +15,24 @@ def _doc(params: dict):
     return doc
 
 
-def _node(doc, node_id):
+def _node(doc, node_id, required=True):
+    n = None
     if not node_id:
-        return doc.activeNode()
-    try:
-        n = doc.nodeByUniqueID(node_id)
-        if n is not None:
-            return n
-    except Exception:
-        pass
-    return doc.nodeByName(node_id)
+        n = doc.activeNode()
+        if n is None:
+            children = doc.rootNode().childNodes()
+            if children:
+                n = children[0]
+    else:
+        try:
+            n = doc.nodeByUniqueID(node_id)
+        except Exception:
+            n = None
+        if n is None:
+            n = doc.nodeByName(node_id)
+    if n is None and required:
+        raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id!r}")
+    return n
 
 
 def _img_to_png_b64(img: QImage) -> str:
@@ -119,7 +127,7 @@ def set_channel_pixels(params: dict) -> dict:
         raise RuntimeError(f"INVALID_PARAM: 通道不存在 {params['channel']}")
     img = _b64_to_img(params["image_b64"]).convertToFormat(
         QImage.Format.Format_Grayscale8)
-    raw = img.bits().asstring(img.byteCount())
+    raw = img.bits().asstring(img.sizeInBytes())
     line = img.bytesPerLine()
     need = img.width()
     packed = b"".join(raw[i * line:i * line + need]
@@ -173,7 +181,7 @@ def set_selection_pixels(params: dict) -> dict:
     doc = _doc(params)
     img = _b64_to_img(params["image_b64"]).convertToFormat(
         QImage.Format.Format_Grayscale8)
-    raw = img.bits().asstring(img.byteCount())
+    raw = img.bits().asstring(img.sizeInBytes())
     line = img.bytesPerLine()
     need = img.width()
     packed = b"".join(raw[i * line:i * line + need]

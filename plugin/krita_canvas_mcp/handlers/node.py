@@ -11,19 +11,29 @@ def _active_doc(params: dict):
     return doc
 
 
-def _resolve_node(doc, node_id):
-    """按 node_id（uuid 或名称）定位节点；为空取活动节点；"root" 取根节点。"""
+def _resolve_node(doc, node_id, required=True):
+    """按 node_id（uuid 或名称）定位节点；为空取活动节点；"root" 取根节点。
+    required=True 时若找不到抛 INVALID_NODE，避免 NoneType 崩溃。"""
+    n = None
     if node_id in (None, ""):
-        return doc.activeNode()
-    if node_id == "root":
-        return doc.rootNode()
-    try:
-        n = doc.nodeByUniqueID(node_id)
-        if n is not None:
-            return n
-    except Exception:
-        pass
-    return doc.nodeByName(node_id)
+        n = doc.activeNode()
+        # 兜底：优先取根下第一个子节点（createDocument 后常见）
+        if n is None:
+            children = doc.rootNode().childNodes()
+            if children:
+                n = children[0]
+    elif node_id == "root":
+        n = doc.rootNode()
+    else:
+        try:
+            n = doc.nodeByUniqueID(node_id)
+        except Exception:
+            n = None
+        if n is None:
+            n = doc.nodeByName(node_id)
+    if n is None and required:
+        raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id!r}")
+    return n
 
 
 def _node_tag(node) -> str:
@@ -96,22 +106,22 @@ def create_node(params: dict) -> dict:
 
 
 def create_fill_layer(params: dict) -> dict:
-    """整层纯色填充（color generator）。"""
     from PyQt6.QtGui import QColor
     from krita import InfoObject, Selection
     doc = _active_doc(params)
     name = params.get("name", "fill")
-
     color = params.get("color")
     if color:
-        r, g, b = (int(round(float(v))) for v in color[:3])
+        # 支持 0~1 浮点 或 0~255 整数
+        vals = [float(v) for v in color[:3]]
+        if max(vals) <= 1.0:
+            vals = [v * 255.0 for v in vals]
+        r, g, b = (int(round(v)) for v in vals)
         sel = Selection()
         info = InfoObject()
         info.setProperty("color", QColor(r, g, b))
         layer = doc.createFillLayer(name, "color", info, sel)
     else:
-        # pattern 模式：InfoObject 指定图案名
-        from krita import InfoObject, Selection
         sel = Selection()
         info = InfoObject()
         info.setProperty("pattern", params.get("pattern_name", ""))
