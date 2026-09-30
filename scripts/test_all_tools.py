@@ -112,8 +112,9 @@ class Tester:
         async def run(name, fn, *args):
             try:
                 out = await fn(*args)
-                if out is not None:      # fn 自行 rec 时不应返回;此处兼容
-                    rec(name, "PASS", str(out))
+                # 成功就算 PASS，不管 fn 有没有 return
+                detail = str(out) if out is not None else ""
+                rec(name, "PASS", detail)
             except ToolError as e:
                 rec(name, "FAIL", f"{e.code}: {e.message}")
             except Exception as e:
