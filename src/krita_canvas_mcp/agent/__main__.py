@@ -6,6 +6,7 @@
 前置条件:
     1. Krita 已打开并启用 krita_canvas_mcp 插件(127.0.0.1:5678/rpc)
     2. （可选）画布(活动文档)已按目标图尺寸新建；若无活动文档则自动创建
+    3. GLM API Key 通过环境变量 GLM_API_KEY 或 --api-key 传入
 """
 import argparse
 
@@ -20,6 +21,10 @@ def main() -> None:
                         help="迭代上限")
     parser.add_argument("--api-key", default=None, help="GLM API Key(缺省用环境变量/内置)")
     parser.add_argument("--model", default=None, help="模型名(默认 glm-4.6v-flash)")
+    parser.add_argument("--raw-output", action="store_true",
+                        help="打印 AI 原始输出文本（便于调试）")
+    parser.add_argument("--confirm", action="store_true",
+                        help="每步执行前暂停等待用户确认（回车继续 / q 退出）")
     parser.add_argument("--out-dir", default="outputs", help="结果输出目录")
     parser.add_argument("--endpoint", default=None,
                         help="Krita 插件 RPC 地址(默认 http://127.0.0.1:5678/rpc)")
@@ -32,6 +37,8 @@ def main() -> None:
         max_iterations=args.max_iterations,
         out_dir=args.out_dir,
         endpoint=args.endpoint or "http://127.0.0.1:5678/rpc",
+        raw_output=args.raw_output,
+        confirm=args.confirm,
     )
     try:
         summary = loop.run()

@@ -39,7 +39,9 @@ class AgentLoop:
                  model: str | None = None, max_iterations: int = 200,
                  out_dir: str = "outputs",
                  endpoint: str = DEFAULT_ENDPOINT,
-                 plan_retries: int = 2):
+                 plan_retries: int = 2,
+                 raw_output: bool = False,
+                 confirm: bool = False):
         self.target_path = target_path
         self.max_iterations = max_iterations
         self.out_dir = out_dir
@@ -51,6 +53,9 @@ class AgentLoop:
         self.state = SessionState(out_dir=out_dir)
         os.makedirs(out_dir, exist_ok=True)
         self.session_id = time.strftime("%Y%m%d_%H%M%S")
+        # 可选开关
+        self.raw_output = raw_output    # True 时打印 AI 原始响应文本
+        self.confirm = confirm          # True 时每步执行前等待用户确认
 
     # ------------------------------------------------------------ 初始化
 
@@ -92,7 +97,10 @@ class AgentLoop:
         last_err: GLMError | None = None
         for attempt in range(retries + 1):
             try:
-                return self.glm.chat(self.system, text, images)
+                raw = self.glm.chat(self.system, text, images)
+                if self.raw_output:
+                    print(f"[agent][raw] {raw}")
+                return raw
             except GLMError as e:
                 last_err = e
                 if attempt < retries:
@@ -283,6 +291,22 @@ class AgentLoop:
 
             # ---- 动作分发 ----
             kind = action.get("action")
+
+            # 用户确认开关：对普通工具调用前暂停等待
+            if self.confirm and kind not in ("plan", "next_stage", "done"):
+                tool = action.get("tool", "?")
+                thought = action.get("thought", "")
+                print(f"\n[agent] iter {it} [{self.state.stage}] 下一步: {tool}")
+                if thought:
+                    print(f"  理由: {thought}")
+                print(f"  参数: {json.dumps(action.get('params', {}), ensure_ascii=False)}")
+                try:
+                    ans = input("[agent] 继续？(回车继续 / q 退出) ").strip().lower()
+                except EOFError:
+                    ans = ""
+                if ans == "q":
+                    stop_reason = "user_quit"
+                    break
 
             if kind == "done":
                 stop_reason = "llm_done"
