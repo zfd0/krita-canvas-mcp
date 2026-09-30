@@ -1,5 +1,5 @@
 from krita import Krita
-from PyQt5.QtCore import QByteArray, QBuffer, QIODevice
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice
 import base64
 
 def get_document_info(params: dict) -> dict:
@@ -15,7 +15,7 @@ def get_document_info(params: dict) -> dict:
         "color_model": doc.colorModel(),
         "color_depth": doc.colorDepth(),
         "resolution": doc.resolution(),
-        "is_modified": doc.isModified(),
+        "is_modified": doc.modified(),
     }
 
 def get_canvas_snapshot(params: dict) -> dict:
@@ -43,7 +43,8 @@ def get_canvas_snapshot(params: dict) -> dict:
     # QImage → PNG → base64
     ba = QByteArray()
     buf = QBuffer(ba)
-    buf.open(QIODevice.WriteOnly)
+    # PyQt6: OpenModeFlag 是 scoped 枚举，扁平写法 QIODevice.WriteOnly 已移除
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
     img.save(buf, "PNG")
     b64 = base64.b64encode(bytes(ba)).decode("ascii")
 
@@ -60,6 +61,31 @@ def _hash(img) -> str:
     import hashlib
     ba = QByteArray()
     buf = QBuffer(ba)
-    buf.open(QIODevice.WriteOnly)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)  # PyQt6 scoped 枚举
     img.save(buf, "PNG")
     return hashlib.md5(bytes(ba)).hexdigest()[:16]
+
+
+def list_documents(params: dict) -> dict:
+    """枚举全部打开的文档，供多文档寻址。"""
+    app = Krita.instance()
+    docs = app.documents()
+    out = []
+    active = app.activeDocument()
+    active_id = None
+    for d in docs:
+        did = d.fileName() or f"untitled_{id(d)}"
+        if d is active:
+            active_id = did
+        out.append({
+            "document_id": did,
+            "name": d.name() if hasattr(d, "name") else did,
+            "path": d.fileName(),
+            "width": d.width(),
+            "height": d.height(),
+            "color_model": d.colorModel(),
+            "color_depth": d.colorDepth(),
+            "is_active": d is active,
+            "is_modified": d.modified(),
+        })
+    return {"active_document_id": active_id, "documents": out}
