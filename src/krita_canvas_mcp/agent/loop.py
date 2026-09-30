@@ -164,8 +164,25 @@ class AgentLoop:
 
     def run(self) -> dict:
         """跑完整闭环，返回最终结果摘要。"""
-        # 0) 连接与画布校验
-        doc = self.bridge.call("get_document_info", {})
+        # 0) 连接与画布校验：无活动文档时自动以目标图尺寸新建
+        try:
+            doc = self.bridge.call("get_document_info", {})
+        except KritaError as e:
+            if str(e) == "NO_ACTIVE_DOCUMENT":
+                print("[agent] 无活动文档，自动创建与目标图同尺寸画布")
+                from PIL import Image as _PILImage
+                target_img = _PILImage.open(self.target_path)
+                self.bridge.call("create_document", {
+                    "width": target_img.width,
+                    "height": target_img.height,
+                    "name": f"agent_{int(time.time())}",
+                    "color_model": "RGBA",
+                    "color_depth": "U8",
+                    "resolution": 300,
+                })
+                doc = self.bridge.call("get_document_info", {})
+            else:
+                raise
         canvas_w, canvas_h = int(doc["width"]), int(doc["height"])
         work_w, work_h = self._work_size(canvas_w, canvas_h)
         print(f"[agent] 画布 {canvas_w}x{canvas_h} (工作尺寸 {work_w}x{work_h}) | "
