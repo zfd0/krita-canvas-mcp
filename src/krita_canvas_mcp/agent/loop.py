@@ -21,7 +21,7 @@ from ..bridge import DEFAULT_ENDPOINT, KritaBridge
 from ..errors import ErrCode, KritaError
 from .context_builder import (ParseError, build_plan_prompt, build_user_text,
                               load_system_prompt, parse_action)
-from .glm_client import DEFAULT_MODEL, GLMVisionClient, pil_to_b64
+from .glm_client import DEFAULT_MODEL, GLMError, GLMVisionClient, pil_to_b64
 from .session_state import ActionRecord, CanvasMetrics, SessionState
 from .stage_rules import STAGE_NAMES, validate, validate_next_stage
 
@@ -83,9 +83,25 @@ class AgentLoop:
 
     # ------------------------------------------------------------ LLM 交互
 
-    def _ask(self, text: str, images: list[dict]) -> str:
-        """调 GLM 取回原始文本。"""
-        return self.glm.chat(self.system, text, images)
+    def _ask(self, text: str, images: list[dict], retries: int = 2) -> str:
+        """调 GLM 取回原始文本。
+
+        网络/API 错误按指数退避重试（3s、6s），全部失败后抛 GLMError
+        由调用方决定降级（plan 轮重试 / 迭代轮计数后保存退出）。
+        """
+        last_err: GLMError | None = None
+        for attempt in range(retries + 1):
+            try:
+                return self.glm.chat(self.system, text, images)
+            except GLMError as e:
+                last_err = e
+                if attempt < retries:
+                    wait = 3 * (2 ** attempt)
+                    print(f"[agent] GLM 调用失败({e})，{wait}s 后重试 "
+                          f"{attempt + 1}/{retries}")
+                    time.sleep(wait)
+        assert last_err is not None
+        raise last_err
 
     # ------------------------------------------------------------ 执行
 
@@ -175,8 +191,8 @@ class AgentLoop:
                 plan = act
                 print(f"[agent] plan 就绪: {plan.get('composition', '')[:40]}")
                 break
-            except ParseError as e:
-                plan_err = f"plan 解析失败: {e}"
+            except (ParseError, GLMError) as e:
+                plan_err = f"plan 失败: {e}"
                 print(f"[agent] {plan_err}（重试 {attempt + 1}/{self.plan_retries}）")
         if plan is None:
             raise RuntimeError(plan_err or "plan 生成失败")
@@ -186,6 +202,8 @@ class AgentLoop:
         feedback: list[str] = []
         sample_result = None
         stop_reason = "loop_exit"
+        scalars: dict = {}
+        glm_fail_streak = 0
 
         while True:
             self.state.iteration += 1
@@ -234,6 +252,17 @@ class AgentLoop:
                 feedback = [str(e), "请严格输出单一 JSON 对象"]
                 print(f"[agent] iter {it}: 输出解析失败 - {e}")
                 continue
+            except GLMError as e:
+                # _ask 内部已退避重试；到这表示连续多轮 API 不可用
+                glm_fail_streak += 1
+                print(f"[agent] iter {it}: GLM 连续失败 {glm_fail_streak} 次 - {e}")
+                if glm_fail_streak >= 3:
+                    stop_reason = "glm_failed"
+                    break
+                feedback = [f"GLM 调用失败: {e}，本轮跳过"]
+                time.sleep(3)
+                continue
+            glm_fail_streak = 0  # 成功解析，重置连续失败计数
 
             # ---- 动作分发 ----
             kind = action.get("action")
