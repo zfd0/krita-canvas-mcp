@@ -1,10 +1,16 @@
 # LibKis 绘画执行类工具实现。所有函数在 Krita 主线程由 dispatcher 调用。
 # 对应 Node.paintLine / paintPath / paintPolygon / paintEllipse / paintRectangle / setPixelData。
-from PyQt6.QtCore import QByteArray, QPointF, QRectF
+from PyQt6.QtCore import QByteArray, QPoint, QPointF, QRectF, QUuid
 from PyQt6.QtGui import QImage, QPainterPath
 from krita import Krita
 
 import base64
+import re
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
 
 
 def _active_doc(params: dict):
@@ -17,6 +23,8 @@ def _active_doc(params: dict):
 
 
 def _resolve_node(doc, node_id, required=True):
+    """按 node_id（uuid 或名称）定位节点；为空则取活动节点。
+    兼容纯 UUID、带大括号两种输入格式。"""
     n = None
     if not node_id:
         n = doc.activeNode()
@@ -25,12 +33,20 @@ def _resolve_node(doc, node_id, required=True):
             if children:
                 n = children[0]
     else:
-        try:
-            n = doc.nodeByUniqueID(node_id)
-        except Exception:
-            n = None
+        raw = str(node_id)
+        # 尝试通过 QUuid 对象查找（Krita 6.0+ 要求 QUuid 而非字符串）
+        uuid_obj = None
+        if _UUID_RE.match(raw):
+            uuid_obj = QUuid(raw)
+        elif raw.startswith("{") and raw.endswith("}"):
+            uuid_obj = QUuid(raw[1:-1])
+        if uuid_obj and not uuid_obj.isNull():
+            try:
+                n = doc.nodeByUniqueID(uuid_obj)
+            except Exception:
+                n = None
         if n is None:
-            n = doc.nodeByName(node_id)
+            n = doc.nodeByName(raw)
     if n is None and required:
         raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id!r}")
     return n
@@ -45,13 +61,15 @@ def paint_line(params: dict) -> dict:
     """两点直线，可带首尾压感。"""
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
+    # LibKis paintLine 只接受整数 QPoint（浮点强转 int 兼容 LLM 输出）
     node.paintLine(
-        QPointF(params["x1"], params["y1"]),
-        QPointF(params["x2"], params["y2"]),
+        QPoint(int(params["x1"]), int(params["y1"])),
+        QPoint(int(params["x2"]), int(params["y2"])),
         params.get("pressure1", 1.0),
         params.get("pressure2", 1.0),
         _style(params.get("stroke_style")),
     )
+    doc.refreshProjection()
     return {"drawn": True}
 
 
@@ -92,6 +110,7 @@ def paint_path(params: dict) -> dict:
         _style(params.get("stroke_style")),
         _style(params.get("fill_style", "None")),
     )
+    doc.refreshProjection()
     return {"drawn": True}
 
 
@@ -115,6 +134,7 @@ def paint_shape(params: dict) -> dict:
         node.paintPolygon(pts, stroke, fill)
     else:
         raise RuntimeError(f"INVALID_PARAM: 未知 shape {shape}")
+    doc.refreshProjection()
     return {"drawn": True}
 
 
@@ -146,24 +166,27 @@ def write_pixels(params: dict) -> dict:
 
     blend = params.get("blend_mode", "overwrite")
     if blend != "overwrite":
-        # alpha_composite：读原图层像素，按 alpha 合成（numpy 可用则向量化）
-        try:
-            import numpy as np
-        except ImportError:
-            raise RuntimeError("NOT_IMPLEMENTED: alpha_composite 需要 numpy")
+        # alpha_composite：读取原图层像素，逐像素按 alpha 混合。
+        # 不用 numpy（Krita 内置 Python 通常未安装第三方库），补丁规模小，纯 Python 足够。
         cur_raw = bytes(node.pixelData(params["x"], params["y"],
                                        params["width"], params["height"]))
-        cur = np.frombuffer(cur_raw, dtype=np.uint8).reshape(
-            params["height"], params["width"], 4).astype(np.float32)
-        new = np.frombuffer(data, dtype=np.uint8).reshape(
-            params["height"], params["width"], 4).astype(np.float32)
-        # BGRA 序：alpha 在第 4 通道
-        a_new = new[..., 3:4] / 255.0
-        out = new * a_new + cur * (1 - a_new)
-        data = out.astype(np.uint8).tobytes()
+        new_ba = bytearray(data)
+        h, w = params["height"], params["width"]
+        for i in range(h):
+            base = i * w * 4
+            for j in range(w):
+                o = base + j * 4
+                a = new_ba[o + 3]
+                ia = 255 - a
+                for c in range(3):
+                    new_ba[o + c] = (new_ba[o + c] * a
+                                     + cur_raw[o + c] * ia) // 255
+                new_ba[o + 3] = a + (cur_raw[o + 3] * ia) // 255
+        data = bytes(new_ba)
 
     node.setPixelData(QByteArray(data), params["x"], params["y"],
                       params["width"], params["height"])
+    doc.refreshProjection()
     return {"written": True, "width": img.width(), "height": img.height()}
 
 

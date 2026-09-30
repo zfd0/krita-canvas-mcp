@@ -2,10 +2,16 @@
 # get_node_pixels / list_channels / get_channel_pixels / set_channel_pixels /
 # get_selection_pixels / set_selection_pixels / selection_op
 from krita import Krita, Selection
-from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QRect
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QRect, QUuid
 from PyQt6.QtGui import QImage
 
 import base64
+import re
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
 
 
 def _doc(params: dict):
@@ -16,6 +22,8 @@ def _doc(params: dict):
 
 
 def _node(doc, node_id, required=True):
+    """按 node_id（uuid 或名称）定位节点；为空取活动节点。
+    兼容纯 UUID、带大括号两种输入格式。"""
     n = None
     if not node_id:
         n = doc.activeNode()
@@ -24,12 +32,20 @@ def _node(doc, node_id, required=True):
             if children:
                 n = children[0]
     else:
-        try:
-            n = doc.nodeByUniqueID(node_id)
-        except Exception:
-            n = None
+        raw = str(node_id)
+        # 尝试通过 QUuid 对象查找（Krita 6.0+ 要求 QUuid 而非字符串）
+        uuid_obj = None
+        if _UUID_RE.match(raw):
+            uuid_obj = QUuid(raw)
+        elif raw.startswith("{") and raw.endswith("}"):
+            uuid_obj = QUuid(raw[1:-1])
+        if uuid_obj and not uuid_obj.isNull():
+            try:
+                n = doc.nodeByUniqueID(uuid_obj)
+            except Exception:
+                n = None
         if n is None:
-            n = doc.nodeByName(node_id)
+            n = doc.nodeByName(raw)
     if n is None and required:
         raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id!r}")
     return n
@@ -143,6 +159,11 @@ def set_channel_pixels(params: dict) -> dict:
 
 # ---------------------------------------------------------------- 选区
 
+def _selection_bounds(sel):
+    """选区边界。LibKis Selection 无 bounds()，用 x/y/width/height 拼装。"""
+    return [sel.x(), sel.y(), sel.width(), sel.height()]
+
+
 def get_selection_pixels(params: dict) -> dict:
     """当前选区 → 灰度蒙版 PNG。无选区返回全黑。"""
     doc = _doc(params)
@@ -157,9 +178,8 @@ def get_selection_pixels(params: dict) -> dict:
                 "region": {"x": x, "y": y, "width": w, "height": h}}
     raw = bytes(sel.pixelData(x, y, w, h))
     img = QImage(raw, w, h, w, QImage.Format.Format_Grayscale8).copy()
-    b = sel.bounds()
     return {"image_b64": _img_to_png_b64(img), "has_selection": True,
-            "selection_bounds": [b.x(), b.y(), b.width(), b.height()],
+            "selection_bounds": _selection_bounds(sel),
             "region": {"x": x, "y": y, "width": w, "height": h}}
 
 
@@ -245,8 +265,10 @@ def selection_op(params: dict) -> dict:
     else:
         raise RuntimeError(f"INVALID_PARAM: 未知选区 op {op}")
 
-    doc.setSelection(sel)
+    if op == "clear":
+        # clear 表示移除选区：不应把已清空的选区写回文档（否则 doc.selection() 恒非 None）
+        doc.setSelection(None)
+    else:
+        doc.setSelection(sel)
     doc.refreshProjection()
-    b = sel.bounds()
-    return {"op": op,
-            "bounds": [b.x(), b.y(), b.width(), b.height()]}
+    return {"op": op, "bounds": _selection_bounds(sel)}

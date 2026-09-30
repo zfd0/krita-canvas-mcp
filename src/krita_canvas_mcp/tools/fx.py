@@ -45,7 +45,7 @@ def register(mcp: MCPServer) -> None:
             "angle_y": angle_y, "x_res": x_res, "y_res": y_res,
             "region": region, "strategy": strategy,
         }.items() if v is not None}
-        return _call("transform_document", **params)
+        return _call("transform_document", params)
 
     @mcp.tool(
         name="transform_node",
@@ -62,4 +62,4 @@ def register(mcp: MCPServer) -> None:
             "angle": angle, "angle_y": angle_y,
             "crop_region": crop_region, "strategy": strategy,
         }.items() if v is not None}
-        return _call("transform_node", **params)
+        return _call("transform_node", params)

@@ -1,9 +1,15 @@
 # 滤镜 / 变换类工具实现。
 # apply_filter / get_filter_config / transform_document / transform_node
 from krita import Krita, Selection
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, QUuid
 
 import math
+import re
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
 
 
 def _doc(params: dict):
@@ -16,13 +22,22 @@ def _doc(params: dict):
 def _node(doc, node_id):
     if not node_id:
         return doc.activeNode()
-    try:
-        n = doc.nodeByUniqueID(node_id)
-        if n is not None:
-            return n
-    except Exception:
-        pass
-    return doc.nodeByName(node_id)
+    raw = str(node_id)
+    # 尝试通过 QUuid 对象查找（Krita 6.0+ 要求 QUuid 而非字符串）
+    uuid_obj = None
+    if _UUID_RE.match(raw):
+        uuid_obj = QUuid(raw)
+    elif raw.startswith("{") and raw.endswith("}"):
+        uuid_obj = QUuid(raw[1:-1])
+    n = None
+    if uuid_obj and not uuid_obj.isNull():
+        try:
+            n = doc.nodeByUniqueID(uuid_obj)
+        except Exception:
+            n = None
+    if n is None:
+        n = doc.nodeByName(raw)
+    return n
 
 
 def _strategies():

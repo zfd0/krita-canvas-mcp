@@ -1,8 +1,15 @@
 # 矢量图层/形状类工具实现。
 # vector_add_svg / vector_get_shapes / vector_shape_op / vector_export_svg
 from krita import Krita
-from PyQt6.QtCore import QPointF, QRectF
+from PyQt6.QtCore import QPointF, QRectF, QUuid
 from PyQt6.QtGui import QTransform
+
+import re
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
 
 
 def _doc(params: dict):
@@ -16,12 +23,20 @@ def _vec_layer(doc, node_id):
     """定位矢量图层（缺省活动节点）。"""
     node = None
     if node_id:
-        try:
-            node = doc.nodeByUniqueID(node_id)
-        except Exception:
-            node = None
+        raw = str(node_id)
+        # 尝试通过 QUuid 对象查找（Krita 6.0+ 要求 QUuid 而非字符串）
+        uuid_obj = None
+        if _UUID_RE.match(raw):
+            uuid_obj = QUuid(raw)
+        elif raw.startswith("{") and raw.endswith("}"):
+            uuid_obj = QUuid(raw[1:-1])
+        if uuid_obj and not uuid_obj.isNull():
+            try:
+                node = doc.nodeByUniqueID(uuid_obj)
+            except Exception:
+                node = None
         if node is None:
-            node = doc.nodeByName(node_id)
+            node = doc.nodeByName(raw)
     else:
         node = doc.activeNode()
     if node is None or str(node.type()) != "vectorlayer":

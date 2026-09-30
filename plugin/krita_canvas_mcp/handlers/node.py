@@ -1,6 +1,14 @@
 # 图层/节点管理类工具实现。
 # create_node / set_node_props / manage_node / get_node_tree
 from krita import Krita
+from PyQt6.QtCore import QUuid
+
+import re
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
 
 
 def _active_doc(params: dict):
@@ -13,11 +21,11 @@ def _active_doc(params: dict):
 
 def _resolve_node(doc, node_id, required=True):
     """按 node_id（uuid 或名称）定位节点；为空取活动节点；"root" 取根节点。
-    required=True 时若找不到抛 INVALID_NODE，避免 NoneType 崩溃。"""
+    兼容纯 UUID、带大括号两种输入格式。
+    required=True 时找不到抛 INVALID_NODE。"""
     n = None
     if node_id in (None, ""):
         n = doc.activeNode()
-        # 兜底：优先取根下第一个子节点（createDocument 后常见）
         if n is None:
             children = doc.rootNode().childNodes()
             if children:
@@ -25,26 +33,55 @@ def _resolve_node(doc, node_id, required=True):
     elif node_id == "root":
         n = doc.rootNode()
     else:
-        try:
-            n = doc.nodeByUniqueID(node_id)
-        except Exception:
-            n = None
+        raw = str(node_id)
+        # 尝试通过 QUuid 对象查找（Krita 6.0+ 要求 QUuid 而非字符串）
+        uuid_obj = None
+        if _UUID_RE.match(raw):
+            uuid_obj = QUuid(raw)
+        elif raw.startswith("{") and raw.endswith("}"):
+            uuid_obj = QUuid(raw[1:-1])
+        if uuid_obj and not uuid_obj.isNull():
+            try:
+                n = doc.nodeByUniqueID(uuid_obj)
+            except Exception:
+                n = None
         if n is None:
-            n = doc.nodeByName(node_id)
+            n = doc.nodeByName(raw)
     if n is None and required:
         raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id!r}")
     return n
 
 
+def _find_by_name(doc, name):
+    """递归按名称查找节点（不依赖 nodeByName 的查找范围语义）。"""
+    def rec(n):
+        if n.name() == name:
+            return n
+        for c in n.childNodes():
+            r = rec(c)
+            if r is not None:
+                return r
+        return None
+    return rec(doc.rootNode())
+
+
 def _node_tag(node) -> str:
-    """节点的稳定标识（uuid 字符串，优先）。"""
+    """节点的稳定标识（纯 UUID 字符串，无 PyQt 包装、无大括号）。"""
     try:
         u = node.uniqueId()
-        if u is not None and str(u):
-            return str(u)
+        if u is None:
+            return node.name()
+        # PyQt6 QUuid: 优先 toString()，否则 str()，最后正则兜底
+        try:
+            s = u.toString()
+        except AttributeError:
+            s = str(u)
+        m = _UUID_RE.search(str(s))
+        if m:
+            return m.group(0)
+        return node.name()
     except Exception:
-        pass
-    return node.name()
+        return node.name()
 
 
 def _walk(node, out: dict, depth: int = 0):
@@ -177,7 +214,18 @@ def manage_node(params: dict) -> dict:
         doc.refreshProjection()
         return {"op": op, "uuid": _node_tag(dup) if dup else None}
     if op == "merge_down":
+        # 记录下层兄弟名：Krita 6 合并销毁上下两层后重建的结果节点沿用下层名
+        parent = node.parentNode() or doc.rootNode()
+        siblings = list(parent.childNodes())
+        idx = siblings.index(node) if node in siblings else -1
+        below_name = siblings[idx - 1].name() if idx > 0 else None
         merged = node.mergeDown()
+        if merged is None:
+            # mergeDown 返回 None：按保留下来的下层名查找新结果节点
+            if below_name:
+                merged = _find_by_name(doc, below_name)
+            if merged is None:
+                merged = _find_by_name(doc, node.name())
         doc.refreshProjection()
         return {"op": op, "uuid": _node_tag(merged) if merged else None}
     if op == "move":

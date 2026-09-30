@@ -24,10 +24,18 @@ def _fg_hex(view) -> str:
     return None
 
 
+def _canvas(view):
+    """取视图画布；无画布（如视图未就绪/浮动窗口异常）时报错。"""
+    canvas = view.canvas()
+    if canvas is None:
+        raise RuntimeError("NO_ACTIVE_DOCUMENT: 视图无可用画布")
+    return canvas
+
+
 def get_view_state(params: dict) -> dict:
     """读回视图（缩放/旋转/镜像）与当前绘画参数。"""
     view = _view()
-    canvas = view.canvas()
+    canvas = _canvas(view)
     preset = view.currentBrushPreset()
     return {
         "zoom": round(canvas.zoomLevel(), 4),
@@ -50,7 +58,7 @@ def get_view_state(params: dict) -> dict:
 def set_view_state(params: dict) -> dict:
     """设置视图：缩放/平移/旋转/镜像/复位。"""
     view = _view()
-    canvas = view.canvas()
+    canvas = _canvas(view)
     applied = []
     if params.get("reset_view"):
         canvas.resetZoom()

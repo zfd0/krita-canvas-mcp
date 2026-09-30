@@ -41,7 +41,7 @@ def register(mcp: MCPServer) -> None:
             "visible": visible, "group_name": group_name,
             "group_with": group_with,
         }.items() if v is not None or k in ("op", "node_id", "shape_index")}
-        return _call("vector_shape_op", **params)
+        return _call("vector_shape_op", params)
 
     @mcp.tool(
         name="vector_export_svg",

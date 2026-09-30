@@ -21,7 +21,7 @@ from .session_store import store
 
 def _snapshot_arr(max_side: int = 1024) -> np.ndarray:
     """当前画布快照 → numpy RGB。"""
-    data = _decode(call("get_canvas_snapshot", {"max_side": max_side}))
+    data = _decode(_call("get_canvas_snapshot", {"max_side": max_side}))
     img = Image.open(io.BytesIO(base64.b64decode(data["image_b64"]))).convert("RGB")
     return np.asarray(img, dtype=np.uint8)
 
@@ -36,7 +36,7 @@ def _decode(text: str) -> dict:
 
 
 def _canvas_size() -> tuple:
-    info = _decode(call("get_document_info", {}, quiet=True))
+    info = _decode(_call("get_document_info", {}, quiet=True))
     return int(info["width"]), int(info["height"])
 
 
@@ -125,8 +125,8 @@ def register(mcp: MCPServer) -> None:
     ) -> str:
         tgt = store.get_target()
         cw, ch = _canvas_size()
-        info = _decode(call("get_document_info",
-                            {"document_id": document_id}, quiet=True))
+        info = _decode(_call("get_document_info",
+                             {"document_id": document_id}, quiet=True))
         if tgt is None:
             return ok({"valid": False, "mismatch_reason": "no_target",
                        "canvas_size": [cw, ch]})
@@ -275,7 +275,7 @@ def register(mcp: MCPServer) -> None:
         path = None
         if save_partial:
             try:
-                data = _decode(call("get_canvas_snapshot", {}, quiet=True))
+                data = _decode(_call("get_canvas_snapshot", {}, quiet=True))
                 import os
                 os.makedirs("outputs", exist_ok=True)
                 path = f"outputs/partial_{int(time.time())}.png"
@@ -285,7 +285,7 @@ def register(mcp: MCPServer) -> None:
                 path = None
         if not keep_canvas:
             try:
-                _decode(call("execute_action", {"action_name": "clear"}))
+                _decode(_call("execute_action", {"action_name": "clear"}))
             except KritaError:
                 pass
         iters = store.iteration
@@ -338,9 +338,9 @@ def register(mcp: MCPServer) -> None:
         document_id: str | None = None, algorithm: str = "perceptual",
         region: dict | None = None,
     ) -> str:
-        data = _decode(call("get_canvas_snapshot",
-                            {"document_id": document_id, "region": region},
-                            quiet=True))
+        data = _decode(_call("get_canvas_snapshot",
+                             {"document_id": document_id, "region": region},
+                             quiet=True))
         h = data.get("snapshot_hash", "")
         changed = store.last_snapshot_hash is not None \
             and store.last_snapshot_hash != h

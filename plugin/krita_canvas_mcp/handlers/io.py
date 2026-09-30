@@ -5,6 +5,13 @@ from krita import Krita, InfoObject
 
 import json
 import os
+import re
+from PyQt6.QtCore import QUuid
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
 
 
 def _app():
@@ -130,12 +137,20 @@ def save_document(params: dict) -> dict:
         path = params["file_path"]
         node_id = params.get("node_id")
         if node_id:
-            node = doc.nodeByName(node_id)
+            raw = str(node_id)
+            node = doc.nodeByName(raw)
             if node is None:
-                try:
-                    node = doc.nodeByUniqueID(node_id)
-                except Exception:
-                    node = None
+                # 尝试通过 QUuid 对象查找（Krita 6.0+ 要求 QUuid 而非字符串）
+                uuid_obj = None
+                if _UUID_RE.match(raw):
+                    uuid_obj = QUuid(raw)
+                elif raw.startswith("{") and raw.endswith("}"):
+                    uuid_obj = QUuid(raw[1:-1])
+                if uuid_obj and not uuid_obj.isNull():
+                    try:
+                        node = doc.nodeByUniqueID(uuid_obj)
+                    except Exception:
+                        node = None
             if node is None:
                 raise RuntimeError(f"INVALID_NODE: {node_id}")
             out_path = path

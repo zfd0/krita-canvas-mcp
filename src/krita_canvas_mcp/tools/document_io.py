@@ -49,7 +49,7 @@ def register(mcp: MCPServer) -> None:
             "png_config": png_config, "jpeg_config": jpeg_config,
             "node_id": node_id,
         }.items() if v is not None}
-        return _call("save_document", **params)
+        return _call("save_document", params)
 
     @mcp.tool(
         name="get_krita_info",
@@ -103,4 +103,4 @@ def register(mcp: MCPServer) -> None:
             "zoom": zoom, "rotation": rotation, "mirror": mirror,
             "center_to": center_to, "reset_view": reset_view,
         }.items() if v is not None or k == "reset_view"}
-        return _call("set_view_state", **params)
+        return _call("set_view_state", params)

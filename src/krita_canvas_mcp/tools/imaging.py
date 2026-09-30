@@ -44,4 +44,4 @@ def register(mcp: MCPServer) -> None:
             "value": value, "radius": radius, "node_ref": node_ref,
             "edge_lock": edge_lock,
         }.items() if v is not None}
-        return _call("selection_op", **params)
+        return _call("selection_op", params)

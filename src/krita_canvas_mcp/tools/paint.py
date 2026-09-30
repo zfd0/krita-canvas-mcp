@@ -14,14 +14,16 @@ def register(mcp: MCPServer) -> None:
                     "绘制后请调用 wait_for_done 确保投影同步。",
     )
     def paint_line(
-        x1: float, y1: float, x2: float, y2: float,
+        x1: int, y1: int, x2: int, y2: int,
         node_id: str | None = None,
         pressure1: float = 1.0, pressure2: float = 1.0,
         stroke_style: str = "ForegroundColor",
     ) -> str:
         return _call(
-            "paint_line", node_id=node_id, x1=x1, y1=y1, x2=x2, y2=y2,
-            pressure1=pressure1, pressure2=pressure2, stroke_style=stroke_style,
+            "paint_line",
+            {"node_id": node_id, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+             "pressure1": pressure1, "pressure2": pressure2,
+             "stroke_style": stroke_style},
         )
 
     @mcp.tool(
@@ -36,8 +38,10 @@ def register(mcp: MCPServer) -> None:
         stroke_style: str = "ForegroundColor", fill_style: str = "None",
     ) -> str:
         return _call(
-            "paint_path", node_id=node_id, points=points, smooth=smooth,
-            closed=closed, stroke_style=stroke_style, fill_style=fill_style,
+            "paint_path",
+            {"node_id": node_id, "points": points, "smooth": smooth,
+             "closed": closed, "stroke_style": stroke_style,
+             "fill_style": fill_style},
         )
 
     @mcp.tool(
@@ -51,8 +55,10 @@ def register(mcp: MCPServer) -> None:
         stroke_style: str = "None", fill_style: str = "ForegroundColor",
     ) -> str:
         return _call(
-            "paint_shape", node_id=node_id, shape=shape, rect=rect,
-            points=points, stroke_style=stroke_style, fill_style=fill_style,
+            "paint_shape",
+            {"node_id": node_id, "shape": shape, "rect": rect,
+             "points": points, "stroke_style": stroke_style,
+             "fill_style": fill_style},
         )
 
     @mcp.tool(
@@ -64,8 +70,10 @@ def register(mcp: MCPServer) -> None:
         node_id: str | None = None, blend_mode: str = "overwrite",
     ) -> str:
         return _call(
-            "write_pixels", node_id=node_id, x=x, y=y, width=width,
-            height=height, image_b64=image_b64, blend_mode=blend_mode,
+            "write_pixels",
+            {"node_id": node_id, "x": x, "y": y, "width": width,
+             "height": height, "image_b64": image_b64,
+             "blend_mode": blend_mode},
         )
 
     @mcp.tool(

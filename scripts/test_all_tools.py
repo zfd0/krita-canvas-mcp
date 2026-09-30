@@ -216,18 +216,23 @@ async def run_all(t: Tester):
     await run("1.9 list_channels RGBA×4", obs09)
 
     async def obs10():
+        # 通道名自 list_channels 动态获取（避免硬编码 'Alpha' 因本地化不一致）
+        ch = await t.must("list_channels", node_id=CTX["uuid_a"])
+        names = [c["name"] for c in ch["channels"]]
+        CTX["alpha_channel"] = next((n for n in names
+                                     if "alpha" in n.lower() or "a" == n.lower()),
+                                    names[-1])
         d = await t.must("get_channel_pixels", node_id=CTX["uuid_a"],
-                         channel="Alpha",
+                         channel=CTX["alpha_channel"],
                          region={"x": 0, "y": 0, "width": 64, "height": 64})
         assert d["image_b64"]
     await run("1.10 get_channel_pixels alpha", obs10)
 
     async def obs11():
-        for cs in ("srgb_hex", "srgb_255", "srgb_float", "lab", "hsv"):
-            d = await t.must("sample_color", x=256, y=256, radius=0)
-            # sample_color 返回全部色彩空间
         d = await t.must("sample_color", x=256, y=256, radius=0)
-        assert len(d["color"]) >= 5
+        # sample_color 一次返回全部色彩空间表示
+        assert set(("srgb_hex", "srgb_255", "srgb_float", "lab", "hsv")) \
+            <= set(d["color"].keys()), d["color"]
     await run("1.11 sample_color 多色彩空间", obs11)
 
     async def obs12():
@@ -284,6 +289,10 @@ async def run_all(t: Tester):
                          file_path=t.target)
         CTX["uuid_file"] = f["uuid"]
     await run("2.5 create_node filelayer", s24)
+
+    # 绘画层 A 置顶：阶段 2 新建的 fill/vector/file 层默认堆叠在 A 之上，
+    # 后续 3.x 对画布投影的采样必须命中 A 层内容
+    await t.must("manage_node", node_id=CTX["uuid_a"], op="reorder")
 
     async def s25():
         await t.must("set_node_props", node_id=CTX["uuid_a"],
@@ -430,9 +439,9 @@ async def run_all(t: Tester):
         import base64
         b64 = await _gray_patch_b64(8, 8, 200)
         await t.must("set_channel_pixels", node_id=CTX["uuid_a"],
-                     channel="Alpha", x=300, y=200, image_b64=b64)
+                     channel=CTX["alpha_channel"], x=300, y=200, image_b64=b64)
         d = await t.must("get_channel_pixels", node_id=CTX["uuid_a"],
-                         channel="Alpha",
+                         channel=CTX["alpha_channel"],
                          region={"x": 300, "y": 200, "width": 8, "height": 8})
         assert d["image_b64"]
     await run("3.13 set/get_channel_pixels alpha", s44)
@@ -645,7 +654,10 @@ async def run_all(t: Tester):
         await t.must("manage_node", node_id=m2["uuid"], op="set_active")
         d = await t.must("manage_node", node_id=m2["uuid"], op="merge_down")
         assert d["op"] == "merge_down"
-        await t.must("manage_node", node_id=m1["uuid"], op="remove")
+        # Krita 6 合并会销毁上下两层并重建结果节点（m1/m2 原 uuid 均失效），
+        # 用 merge 返回值（新 uuid）清理，缺省回退 m1
+        await t.must("manage_node",
+                     node_id=d.get("uuid") or m1["uuid"], op="remove")
     await run("7.6 merge_down 专测", s77)
 
     async def s78():
@@ -835,21 +847,26 @@ async def run_all(t: Tester):
     await run("10.1 open_document(target)", s107)
 
     async def s108():
-        import os, tempfile
+        import os, tempfile, time
         out = os.path.join(tempfile.gettempdir(), "mcp_saveas.kra")
         d = await t.must("save_document", mode="save_as", file_path=out,
                          format="kra")
         assert d["file_exists"]
-        os.remove(out)
+        # Windows 下 Krita 写入 .kra 后句柄可能延迟 ~1s 释放：删除加重试
+        for i in range(10):
+            try:
+                os.remove(out)
+                break
+            except PermissionError:
+                time.sleep(1)
+        else:
+            raise PermissionError(f"Krita 长时间占用文件: {out}")
     await run("10.2 save_document(save_as .kra)", s108)
 
     async def s109():
+        # 直接导出当前活动文档（避免关文档破坏后续用例的状态链）
         import os, tempfile
         out = os.path.join(tempfile.gettempdir(), "mcp_node_export.png")
-        await t.must("set_colors", foreground="#FF0000")
-        d = await t.must("get_view_state")
-        # 活动文档为 target 图；改为导出主文档 A 层
-        await t.must("close_document")
         d = await t.must("save_document", mode="export", file_path=out,
                          format="png")
         assert d["file_exists"]
@@ -857,17 +874,19 @@ async def run_all(t: Tester):
     await run("10.3 save_document(export)", s109)
 
     async def s110():
-        d = await t.must("get_setting", name="__test_key__",
+        # 随机 key：避免 kritarc 上下次运行残留导致默认值断言失败
+        CTX["set_key"] = "__test_key__" + str(int(time.time()))
+        d = await t.must("get_setting", name=CTX["set_key"],
                          default_value="def")
-        assert d["value"] == "def"
+        assert d["value"] == "def", d
     await run("10.4 get_setting 默认值", s110)
 
     async def s111():
-        await t.must("set_setting", name="__test_key__", value="hello")
+        await t.must("set_setting", name=CTX["set_key"], value="hello")
     await run("10.5 set_setting 写", s111)
 
     async def s112():
-        d = await t.must("get_setting", name="__test_key__")
+        d = await t.must("get_setting", name=CTX["set_key"])
         assert d["value"] == "hello", d
     await run("10.6 get_setting 读回一致", s112)
 

@@ -32,6 +32,8 @@ def get_canvas_snapshot(params: dict) -> dict:
         x, y = region["x"], region["y"]
         w, h = region["width"], region["height"]
 
+    # LibKis 写像素/笔刷操作后投影为惰性合成：读取前强制刷新，保证快照为最新画面
+    doc.refreshProjection()
     img = doc.projection(x, y, w, h)  # QImage
 
     # 缩放到 max_side

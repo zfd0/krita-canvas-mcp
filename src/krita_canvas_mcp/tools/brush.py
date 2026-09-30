@@ -16,7 +16,7 @@ def register(mcp: MCPServer) -> None:
             params["foreground"] = foreground
         if background is not None:
             params["background"] = background
-        return _call("set_colors", **params)
+        return _call("set_colors", params)
 
     @mcp.tool(
         name="set_brush_params",
@@ -31,7 +31,7 @@ def register(mcp: MCPServer) -> None:
             "size": size, "opacity": opacity, "flow": flow,
             "rotation": rotation, "pattern_size": pattern_size,
         }.items() if v is not None}
-        return _call("set_brush_params", **params)
+        return _call("set_brush_params", params)
 
     @mcp.tool(
         name="list_resources",
@@ -69,7 +69,7 @@ def register(mcp: MCPServer) -> None:
             "eraser_mode": eraser_mode, "global_alpha_lock": global_alpha_lock,
             "disable_pressure": disable_pressure,
         }.items() if v is not None}
-        return _call("set_brush_flags", **params)
+        return _call("set_brush_flags", params)
 
     @mcp.tool(
         name="sample_color",
