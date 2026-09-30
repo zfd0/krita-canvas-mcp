@@ -105,7 +105,7 @@ class Tester:
 
     async def sample_hex(self, x: int, y: int, radius: int = 1) -> str:
         d = await self.must("sample_color", x=x, y=y,
-                            radius=radius, reduce="median")
+                            radius=radius, reduce="median", source="canvas")
         return d["color"]["srgb_hex"]
 
     def wrap(self):
@@ -230,7 +230,7 @@ async def run_all(t: Tester):
     await run("1.10 get_channel_pixels alpha", obs10)
 
     async def obs11():
-        d = await t.must("sample_color", x=256, y=256, radius=0)
+        d = await t.must("sample_color", x=256, y=256, radius=0, source="canvas")
         # sample_color 一次返回全部色彩空间表示
         assert set(("srgb_hex", "srgb_255", "srgb_float", "lab", "hsv")) \
             <= set(d["color"].keys()), d["color"]
@@ -457,7 +457,7 @@ async def run_all(t: Tester):
         d = await t.must("extract_palette", max_colors=6,
                          quantize_algorithm="median_cut",
                          save_as_palette="t1")
-        p = await t.must("get_palette")
+        p = await t.must("get_palette", name="t1")
         assert p["colors"] == d["colors"]
     await run("3.15 get_palette 与 extract 一致", s46)
 
@@ -471,7 +471,7 @@ async def run_all(t: Tester):
 
     async def s48():
         d = await t.must("get_paint_progress", against="target")
-        assert 0 <= d["overall"]["covered_pct"] <= 1
+        assert 0 <= d["covered_pct"] <= 1
     await run("3.17 get_paint_progress", s48)
 
     # ---------------- 阶段 4 撤销/同步/历史（12） ----------------

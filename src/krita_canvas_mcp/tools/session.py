@@ -63,20 +63,33 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="list_documents",
-        description="枚举当前 Krita 打开的全部文档(多文档寻址用)。",
+        description="枚举当前Krita打开的所有文档，用于多文档寻址(目标图/画布/参考层)",
     )
-    def list_documents() -> str:
-        return _call("list_documents", {}, quiet=True)
+    def list_documents(include_modified: bool = True, include_path: bool = True) -> str:
+        return _call("list_documents",
+                     {"include_modified": include_modified, "include_path": include_path},
+                     quiet=True)
 
     # ------------------------------------------------------------ 目标图
 
     @mcp.tool(
         name="set_target_image",
-        description="登记闭环临摹的目标图像（加载缓存，供 diff/validate 使用）。",
+        description="设置当前会话的目标图像。这是闭环临摹的参照基准，get_target_image / sample_color(source=target) / diff_with_target 均基于它。可选在活动画布顶层叠加锁定参考层",
     )
-    def set_target_image(file_path: str) -> str:
+    def set_target_image(
+        file_path: str,
+        as_reference_layer: bool = False,
+        reference_opacity: int = 128,
+        reference_position: list | None = None,
+    ) -> str:
+        params: dict = {"file_path": file_path}
+        if as_reference_layer:
+            params["as_reference_layer"] = True
+            params["reference_opacity"] = reference_opacity
+            if reference_position is not None:
+                params["reference_position"] = reference_position
         cw, ch = _canvas_size()
-        return ok(store.set_target(file_path, (cw, ch)))
+        return ok(store.set_target(file_path, (cw, ch), **params))
 
     @mcp.tool(
         name="get_target_image",
@@ -145,11 +158,12 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="diff_with_target",
-        description="画布与目标图的差异：标量指标(mae/rmse/psnr/ssim/ΔE)+热点+可选热力图。",
+        description="计算画布与目标图的差异，返回标量指标(mae/rmse/psnr/ssim/delta_e)+热点+可选热力图。闭环决策与终止判断的核心输入",
     )
     def diff_with_target(
-        region: dict | None = None, max_side: int = 1024,
+        region: dict | None = None, max_side: int = 768,
         mode: str = "perceptual", include_heatmap: bool = True,
+        include_by_region: bool = True,
         top_k_hotspots: int = 8,
     ) -> str:
         tgt = store.get_target()
@@ -160,7 +174,7 @@ def register(mcp: MCPServer) -> None:
         target = np.asarray(
             Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB"),
             dtype=np.uint8)
-        canvas = _snapshot_arr(max(w, h))
+        canvas = _snapshot_arr(max_side)
         if canvas.shape[:2] != target.shape[:2]:
             img = Image.fromarray(canvas).resize((w, h))
             canvas = np.asarray(img, dtype=np.uint8)
@@ -170,6 +184,8 @@ def register(mcp: MCPServer) -> None:
                   "covered_pct": round(m.covered_pct(), 4),
                   "mode": mode,
                   "hotspots": m.hotspots(top_k_hotspots)}
+        if include_by_region:
+            result["by_region"] = m.by_region() if hasattr(m, "by_region") else {}
         if include_heatmap:
             b64h, hw, hh = m.heatmap_b64(512)
             result["heatmap_png_b64"] = b64h
@@ -180,11 +196,13 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_paint_progress",
-        description="画布相对基线的推进统计：覆盖度/变化/未触及区域。",
+        description="统计画布相对基线的推进：已覆盖/未触及/上轮变化，返回区域级覆盖度与停滞检测。阶段切换依据",
     )
     def get_paint_progress(
         against: str = "target", region: dict | None = None,
-        include_mask: bool = False, recent_rounds: int = 3,
+        max_side: int = 768,
+        include_mask: bool = False, include_by_region: bool = True,
+        recent_rounds: int = 3,
     ) -> str:
         tgt = store.get_target()
         if tgt is None:
@@ -194,7 +212,7 @@ def register(mcp: MCPServer) -> None:
         target = np.asarray(
             Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB"),
             dtype=np.uint8)
-        canvas = _snapshot_arr(max(w, h))
+        canvas = _snapshot_arr(max_side)
         if canvas.shape[:2] != target.shape[:2]:
             canvas = np.asarray(
                 Image.fromarray(canvas).resize((w, h)), dtype=np.uint8)
@@ -204,10 +222,12 @@ def register(mcp: MCPServer) -> None:
         delta_last = round(cov - series[-2], 4) if len(series) >= 2 else 0.0
         delta_stage = round(cov - series[0], 4) if len(series) >= 2 else 0.0
         result = {"against": against,
-                  "overall": {"covered_pct": round(cov, 4),
-                              "covered_pct_delta_last_action": delta_last,
-                              "covered_pct_delta_last_stage": delta_stage},
+                  "covered_pct": round(cov, 4),
+                  "covered_pct_delta_last_action": delta_last,
+                  "covered_pct_delta_last_stage": delta_stage,
                   "recent_rounds": [round(v, 4) for v in series[-recent_rounds:]]}
+        if include_by_region and hasattr(m, "by_region"):
+            result["by_region"] = m.by_region()
         if include_mask:
             b64h, hw, hh = m.heatmap_b64(512)
             result["mask_png_b64"] = b64h
@@ -219,15 +239,18 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_action_history",
-        description="拉取最近的工具调用记录（full/summary/stats_only）。",
+        description="拉取最近的绘画动作记录，供LLM感知自身决策轨迹，防原地打转与遗忘",
     )
     def get_action_history(
         last_n: int = 10, since_iteration: int = 0,
+        since_stage: str | None = None,
         format: str = "summary",
         filter_action: list | None = None,
         include_failed: bool = False,
     ) -> str:
         hist = [h for h in store.history if h["iter"] > since_iteration]
+        if since_stage:
+            hist = [h for h in hist if h.get("stage") and h["stage"] >= since_stage]
         if not include_failed:
             hist = [h for h in hist if h["ok"]]
         if filter_action:
@@ -253,7 +276,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_session_state",
-        description="当前会话状态：iteration/stage/target/历史统计。",
+        description="读取当前绘画会话的完整状态：目标图、画布、当前阶段、迭代计数、L0 规划、阶段目标、跨阶段遗留问题、停滞检测。引导层核心状态查询入口",
     )
     def get_session_state(with_history: bool = False) -> str:
         snap = store.snapshot()
@@ -266,11 +289,11 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="abort_session",
-        description="终止当前会话：可选保存部分结果/清空画布，清理目标缓存。",
+        description="终止当前绘画会话，清理缓存与状态。用户中断或目标图换错时使用",
     )
     def abort_session(
-        session_id: str | None = None, save_partial: bool = True,
-        keep_canvas: bool = True,
+        session_id: str | None = None,
+        save_partial: bool = True, keep_canvas: bool = True,
     ) -> str:
         path = None
         if save_partial:
@@ -298,12 +321,16 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="extract_palette",
-        description="从画布合成画面提取主色调色板(kmeans 或 median_cut)。",
+        description="从文档合成画面量化抽取主色(并可写入调色板资源)。取色指导重建",
     )
     def extract_palette(
+        document_id: str | None = None,
+        node_id: str | None = None,
         max_colors: int = 8, quantize_algorithm: str = "kmeans",
         save_as_palette: str | None = None,
     ) -> str:
+        # document_id/node_id 暂不支持（快照基于活动文档）
+        _ = (document_id, node_id)
         canvas = _snapshot_arr(512)
         flat = canvas.reshape(-1, 3).astype(np.float64)
         if quantize_algorithm == "median_cut":
@@ -322,13 +349,14 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_palette",
-        description="读回上次保存的调色板（extract_palette save_as_palette）。",
+        description="读取指定调色板的色值列表，用于 LLM 侧与 Krita 侧调色板对账",
     )
-    def get_palette() -> str:
+    def get_palette(name: str) -> str:
+        """读取指定名称的调色板（当前仅返回 extract_palette 保存的全局调色板）。"""
         if store.palette is None:
             return err(KritaError(ErrCode.NO_TARGET_IMAGE,
                                   "尚无保存的调色板"))
-        return ok({"colors": store.palette})
+        return ok({"name": name, "colors": store.palette})
 
     @mcp.tool(
         name="get_snapshot_hash",

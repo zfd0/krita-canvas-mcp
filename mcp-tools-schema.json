@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Krita Canvas MCP 工具集（LibKis 封装）",
-  "version": "1.1.0",
+  "version": "2026.9.30",
   "description": "将 Krita 通过 LibKis API 封装为 MCP 工具，由 LLM 基于画布快照闭环预测动作并调用执行，逐笔迭代完成对目标图像的过程重建。每个工具对象的 name/description/inputSchema 直接符合 MCP tools/list 规范。坐标一律为图像像素坐标（左上为原点）。所有绘画类工具默认 auto_sync=true，内部执行 waitForDone()+refreshProjection()，保证工具返回时画布合成已更新；闭环快照一致性依赖此行为。目标图是会话级概念，通过 set_target_image 设置，get_target_image / sample_color(source=target) / diff_with_target 均基于它。",
   "categories": [
     "观测/快照类：get_document_info, get_canvas_snapshot, get_node_pixels, get_node_tree, get_view_state, get_target_image, set_target_image, list_documents, list_channels, get_channel_pixels, get_selection_pixels, sample_color, diff_with_target, get_paint_progress, get_action_history, get_snapshot_hash, validate_canvas_target",

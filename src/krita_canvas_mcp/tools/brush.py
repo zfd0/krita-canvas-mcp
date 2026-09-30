@@ -51,10 +51,15 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="set_blending_mode",
-        description="设置画笔混合模式(如 normal/multiply/screen/overlay/erase)。",
+        description="设置画笔混合模式(view级)或图层混合模式(node级)",
     )
-    def set_blending_mode(mode: str) -> str:
-        return _call("set_blending_mode", {"mode": mode})
+    def set_blending_mode(
+        mode: str, scope: str = "brush", node_id: str | None = None,
+    ) -> str:
+        params = {"mode": mode, "scope": scope}
+        if scope == "node" and node_id is not None:
+            params["node_id"] = node_id
+        return _call("set_blending_mode", params)
 
     @mcp.tool(
         name="set_brush_flags",
@@ -73,16 +78,26 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="sample_color",
-        description="从画布/图层采样颜色，返回多色彩空间表示。x/y 为图像坐标，radius 为采样半径。",
+        description="从目标图/画布/图层采样颜色，返回多种色彩空间表示。AI调色的事实来源，防漂移",
     )
     def sample_color(
-        x: int, y: int, source: str = "canvas",
+        x: int, y: int, source: str = "target",
         node_id: str | None = None, radius: int = 0,
         reduce: str = "median",
+        color_space: str = "srgb_hex",
+        exclude_alpha_below: float = 0.1,
+        multiple: list | None = None,
     ) -> str:
-        return _call("sample_color", {"x": x, "y": y, "source": source,
-                                       "node_id": node_id, "radius": radius,
-                                       "reduce": reduce})
+        """采样颜色。multiple 支持多点批量采样。"""
+        params: dict = {
+            "x": x, "y": y, "source": source,
+            "node_id": node_id, "radius": radius,
+            "reduce": reduce, "color_space": color_space,
+            "exclude_alpha_below": exclude_alpha_below,
+        }
+        if multiple is not None:
+            params["multiple"] = multiple
+        return _call("sample_color", params)
 
     @mcp.tool(
         name="undo",

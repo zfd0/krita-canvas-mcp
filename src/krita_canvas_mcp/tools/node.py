@@ -8,26 +8,29 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_node_tree",
-        description="获取完整图层树(名称/类型/uuid/可见性/不透明度/混合模式/子节点)。",
+        description="获取图层树：名称/类型/id/可见性/透明度/混合模式/父子关系",
     )
-    def get_node_tree(document_id: str | None = None) -> str:
-        return _call("get_node_tree", {"document_id": document_id})
+    def get_node_tree(document_id: str | None = None, recursive: bool = True) -> str:
+        return _call("get_node_tree", {"document_id": document_id, "recursive": recursive})
 
     @mcp.tool(
         name="create_node",
-        description="创建图层/蒙版并挂到父节点。node_type 可取 paintlayer/grouplayer/"
-                    "vectorlayer/filllayer/clonelayer/filtermask/selectionmask/filelayer 等。",
+        description="创建图层/蒙版并挂到指定父节点",
     )
     def create_node(
         name: str, node_type: str,
         parent_id: str | None = None, above_id: str | None = None,
-        set_active: bool = True, file_path: str | None = None,
+        file_path: str | None = None,
+        fill_color: list | None = None,
+        set_active: bool = True,
     ) -> str:
-        params = {k: v for k, v in {
+        params: dict = {k: v for k, v in {
             "name": name, "node_type": node_type, "parent_id": parent_id,
             "above_id": above_id, "set_active": set_active,
             "file_path": file_path,
         }.items() if v is not None}
+        if fill_color is not None:
+            params["fill_color"] = fill_color
         return _call("create_node", params)
 
     @mcp.tool(

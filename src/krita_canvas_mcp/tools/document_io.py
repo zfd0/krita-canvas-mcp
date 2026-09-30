@@ -8,18 +8,22 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="create_document",
-        description="新建画布文档并展示（色彩模型/色深/分辨率可指定）。",
+        description="新建画布(含指定色彩模型/色深/ICC/分辨率)",
     )
     def create_document(
-        width: int, height: int, name: str = "untitled",
+        width: int, height: int, name: str = "painting",
         color_model: str = "RGBA", color_depth: str = "U8",
         profile: str = "", resolution: float = 300,
+        background: list | None = None,
     ) -> str:
-        return _call("create_document", {
+        params: dict = {
             "width": width, "height": height, "name": name,
             "color_model": color_model, "color_depth": color_depth,
             "profile": profile, "resolution": resolution,
-        })
+        }
+        if background is not None:
+            params["background"] = background
+        return _call("create_document", params)
 
     @mcp.tool(
         name="open_document",

@@ -35,13 +35,13 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_node_pixels",
-        description="读取单个图层矩形像素，返回 PNG(base64)（合成前内容）。",
+        description="读取单个图层内容(非合成)，用于分析某一笔或某一层，返回PNG(base64)",
     )
     def get_node_pixels(
-        node_id: str, region: dict | None = None,
+        node_id: str, region: dict | None = None, max_side: int = 1024,
     ) -> str:
         return _call("get_node_pixels",
-                     {"node_id": node_id, "region": region}, quiet=True)
+                     {"node_id": node_id, "region": region, "max_side": max_side}, quiet=True)
 
     @mcp.tool(
         name="list_channels",
@@ -63,10 +63,11 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="get_selection_pixels",
-        description="当前选区输出为灰度蒙版 PNG(base64)。",
+        description="将当前选区输出为灰度蒙版PNG(0~255 selectedness)",
     )
-    def get_selection_pixels(region: dict | None = None) -> str:
-        return _call("get_selection_pixels", {"region": region}, quiet=True)
+    def get_selection_pixels(document_id: str | None = None, region: dict | None = None) -> str:
+        return _call("get_selection_pixels",
+                     {"document_id": document_id, "region": region}, quiet=True)
 
     @mcp.tool(
         name="get_view_state",

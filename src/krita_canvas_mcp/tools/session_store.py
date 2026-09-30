@@ -75,8 +75,9 @@ class SessionStore:
 
     # ------------------------------------------------------------ 目标图
 
-    def set_target(self, path: str, work_size: tuple) -> dict:
-        """加载目标图并缓存（等比缩放到 work_size 供 diff 对齐）。"""
+    def set_target(self, path: str, work_size: tuple, **kwargs) -> dict:
+        """加载目标图并缓存（等比缩放到 work_size 供 diff 对齐）。
+        kwargs 支持 as_reference_layer / reference_opacity / reference_position。"""
         img = Image.open(path).convert("RGB")
         orig = img.size
         if img.size != work_size:
@@ -90,8 +91,13 @@ class SessionStore:
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=88)
             self.target_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        return {"path": path, "original_size": list(orig),
-                "work_size": list(work_size)}
+        result: dict = {"path": path, "original_size": list(orig),
+                        "work_size": list(work_size)}
+        if kwargs.get("as_reference_layer"):
+            result["as_reference_layer"] = True
+            result["reference_opacity"] = kwargs.get("reference_opacity", 128)
+            result["reference_position"] = kwargs.get("reference_position", [0, 0])
+        return result
 
     def get_target(self) -> tuple:
         """(path, b64, work_size)；未设置抛 KeyError 语义由调用方处理。"""

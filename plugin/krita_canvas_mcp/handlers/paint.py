@@ -58,10 +58,9 @@ def _style(s):
 
 
 def paint_line(params: dict) -> dict:
-    """两点直线，可带首尾压感。"""
+    """两点直线，可带首尾压感。auto_sync=False 时跳过内部同步。"""
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
-    # LibKis paintLine 只接受整数 QPoint（浮点强转 int 兼容 LLM 输出）
     node.paintLine(
         QPoint(int(params["x1"]), int(params["y1"])),
         QPoint(int(params["x2"]), int(params["y2"])),
@@ -69,6 +68,8 @@ def paint_line(params: dict) -> dict:
         params.get("pressure2", 1.0),
         _style(params.get("stroke_style")),
     )
+    if not params.get("auto_sync", True):
+        return {"drawn": True}
     doc.refreshProjection()
     return {"drawn": True}
 
@@ -99,7 +100,7 @@ def _build_path(points, smooth: bool, closed: bool) -> QPainterPath:
 
 
 def paint_path(params: dict) -> dict:
-    """自由笔画：LLM 预测折线顶点，用当前笔刷偶发绘制。smooth 贝塞尔插值。"""
+    """自由笔画：LLM 预测折线顶点，用当前笔刷偶发绘制。smooth 贝塞尔插值。auto_sync=False 时跳过内部同步。"""
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
     path = _build_path(params["points"],
@@ -110,12 +111,14 @@ def paint_path(params: dict) -> dict:
         _style(params.get("stroke_style")),
         _style(params.get("fill_style", "None")),
     )
+    if not params.get("auto_sync", True):
+        return {"drawn": True}
     doc.refreshProjection()
     return {"drawn": True}
 
 
 def paint_shape(params: dict) -> dict:
-    """椭圆/矩形/多边形色块：stroke_style 描边 + fill_style 填充。"""
+    """椭圆/矩形/多边形色块：stroke_style 描边 + fill_style 填充。auto_sync=False 时跳过内部同步。"""
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
     shape = params["shape"]
@@ -134,6 +137,8 @@ def paint_shape(params: dict) -> dict:
         node.paintPolygon(pts, stroke, fill)
     else:
         raise RuntimeError(f"INVALID_PARAM: 未知 shape {shape}")
+    if not params.get("auto_sync", True):
+        return {"drawn": True}
     doc.refreshProjection()
     return {"drawn": True}
 
@@ -148,7 +153,7 @@ def _image_from_b64(b64: str) -> QImage:
 
 
 def write_pixels(params: dict) -> dict:
-    """把 LLM 生成的像素补丁直接写入图层指定区域。"""
+    """把 LLM 生成的像素补丁直接写入图层指定区域。auto_sync=False 时跳过内部同步。"""
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
     img = _image_from_b64(params["image_b64"])
@@ -186,6 +191,8 @@ def write_pixels(params: dict) -> dict:
 
     node.setPixelData(QByteArray(data), params["x"], params["y"],
                       params["width"], params["height"])
+    if not params.get("auto_sync", True):
+        return {"written": True, "width": img.width(), "height": img.height()}
     doc.refreshProjection()
     return {"written": True, "width": img.width(), "height": img.height()}
 
@@ -198,9 +205,10 @@ def check_paintability(params: dict) -> dict:
 
 
 def wait_for_done(params: dict) -> dict:
-    """阻塞至后台笔刷任务完成（可选刷新投影合成）。"""
+    """阻塞至后台笔刷任务完成（可选刷新投影合成），支持超时控制。"""
     doc = _active_doc(params)
-    doc.waitForDone()
+    timeout_ms = params.get("timeout_ms", 60000)
+    doc.waitForDone(timeout_ms)
     if params.get("refresh_projection", True):
         doc.refreshProjection()
     return {"synced": True}

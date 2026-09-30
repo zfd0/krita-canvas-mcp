@@ -69,7 +69,7 @@ def _hash(img) -> str:
 
 
 def list_documents(params: dict) -> dict:
-    """枚举全部打开的文档，供多文档寻址。"""
+    """枚举全部打开的文档，供多文档寻址。支持 include_modified/include_path 过滤。"""
     app = Krita.instance()
     docs = app.documents()
     out = []
@@ -79,15 +79,18 @@ def list_documents(params: dict) -> dict:
         did = d.fileName() or f"untitled_{id(d)}"
         if d is active:
             active_id = did
-        out.append({
+        entry: dict = {
             "document_id": did,
             "name": d.name() if hasattr(d, "name") else did,
-            "path": d.fileName(),
             "width": d.width(),
             "height": d.height(),
             "color_model": d.colorModel(),
             "color_depth": d.colorDepth(),
             "is_active": d is active,
-            "is_modified": d.modified(),
-        })
+        }
+        if params.get("include_modified", True):
+            entry["is_modified"] = d.modified()
+        if params.get("include_path", True):
+            entry["path"] = d.fileName()
+        out.append(entry)
     return {"active_document_id": active_id, "documents": out}

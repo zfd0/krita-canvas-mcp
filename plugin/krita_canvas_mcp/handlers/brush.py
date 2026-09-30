@@ -115,10 +115,25 @@ def set_brush_preset(params: dict) -> dict:
 
 
 def set_blending_mode(params: dict) -> dict:
-    """画笔混合模式（view 级）。"""
+    """设置画笔(view级)或图层(node级)混合模式。scope 默认 brush。"""
+    scope = params.get("scope", "brush")
+    if scope == "node":
+        node_id = params.get("node_id")
+        if not node_id:
+            raise RuntimeError("INVALID_PARAM: scope=node 时需要 node_id")
+        doc = Krita.instance().activeDocument()
+        if doc is None:
+            raise RuntimeError("NO_ACTIVE_DOCUMENT")
+        node = _node(doc, node_id)
+        if node is None:
+            raise RuntimeError(f"INVALID_NODE: 找不到节点 {node_id}")
+        node.setBlendingMode(str(params["mode"]))
+        doc.refreshProjection()
+        return {"scope": "node", "node_id": node_id, "mode": params["mode"]}
+    # brush scope (default)
     view = _active_view()
     view.setCurrentBlendingMode(str(params["mode"]))
-    return {"mode": params["mode"]}
+    return {"scope": "brush", "mode": params["mode"]}
 
 
 def set_brush_flags(params: dict) -> dict:
@@ -225,32 +240,56 @@ def _reduce_pixels(pixels, reduce: str) -> tuple:
 
 
 def sample_color(params: dict) -> dict:
-    """从画布节点采样颜色（source in canvas/node；target 源由 MCP/agent 侧处理）。"""
+    """从画布/目标图/图层采样颜色（source in target/canvas/node；target 源由 MCP 会话处理）。
+    color_space 控制输出格式，exclude_alpha_below 过滤低 alpha 像素，multiple 支持批量采样。"""
     doc = Krita.instance().activeDocument()
     if doc is None:
         raise RuntimeError("NO_ACTIVE_DOCUMENT")
 
-    x = int(params.get("x", 0))
-    y = int(params.get("y", 0))
-    radius = int(params.get("radius", 0))
-    reduce = params.get("reduce", "median")
+    color_space = params.get("color_space", "srgb_hex")
+    exclude_alpha_below = float(params.get("exclude_alpha_below", 0.1))
+    multiple = params.get("multiple")
 
-    img = doc.projection(x - radius, y - radius, radius * 2 + 1, radius * 2 + 1)
-    img = img.convertToFormat(QImage.Format.Format_RGB32)  # 内存字节序 BGRA
-    w, h = img.width(), img.height()
-    pixels = []
-    line = img.bytesPerLine()
-    raw = img.bits().asstring(img.sizeInBytes())  # PyQt6: 整块内存一次性取出
-    for i in range(h):
-        for j in range(w):
-            off = i * line + j * 4
-            b, g, r = raw[off], raw[off + 1], raw[off + 2]
-            pixels.append((r, g, b, 255))
+    def _sample_one(px: int, py: int) -> dict:
+        """对单个坐标执行采样。"""
+        radius = int(params.get("radius", 0))
+        reduce = params.get("reduce", "median")
 
-    rep = _reduce_pixels(pixels, reduce)
-    return {
-        "x": x, "y": y, "radius": radius, "reduce": reduce,
-        "samples_count": len(pixels),
-        "color": _pack_color(rep),
-        "source": params.get("source", "canvas"),
-    }
+        img = doc.projection(max(0, px - radius), max(0, py - radius),
+                             radius * 2 + 1, radius * 2 + 1)
+        img = img.convertToFormat(QImage.Format.Format_RGB32)
+        w, h = img.width(), img.height()
+        pixels = []
+        line = img.bytesPerLine()
+        raw = img.bits().asstring(img.sizeInBytes())
+        for i in range(h):
+            for j in range(w):
+                off = i * line + j * 4
+                b, g, r = raw[off], raw[off + 1], raw[off + 2]
+                a = raw[off + 3]
+                if a / 255.0 < exclude_alpha_below:
+                    continue
+                pixels.append((r, g, b, a))
+
+        if not pixels:
+            return {"x": px, "y": py, "error": "all pixels excluded by alpha threshold"}
+
+        rep = _reduce_pixels(pixels, reduce)
+        packed = _pack_color(rep)
+        # 按 color_space 返回指定格式
+        if color_space in packed:
+            result_color = {color_space: packed[color_space]}
+        else:
+            result_color = packed  # fallback 返回全部
+        return {
+            "x": px, "y": py, "radius": radius, "reduce": reduce,
+            "samples_count": len(pixels),
+            "color": result_color,
+            "source": params.get("source", "canvas"),
+        }
+
+    if multiple:
+        coords = [(p["x"], p["y"]) for p in multiple]
+        results = [_sample_one(cx, cy) for cx, cy in coords]
+        return {"multiple": results}
+    return _sample_one(int(params.get("x", 0)), int(params.get("y", 0)))

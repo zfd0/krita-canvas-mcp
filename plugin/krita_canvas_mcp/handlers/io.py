@@ -37,6 +37,21 @@ def create_document(params: dict) -> dict:
         win.addView(doc)
     app.setActiveDocument(doc)
 
+    # 可选初始背景色
+    background = params.get("background")
+    if background:
+        from PyQt6.QtGui import QColor
+        from krita import ManagedColor
+        vals = [float(v) for v in background[:4]]
+        if max(vals) <= 1.0:
+            vals = [v * 255.0 for v in vals]
+        r, g, b, a = (int(round(v)) for v in vals)
+        mc = ManagedColor.fromQColor(QColor(r, g, b, a))
+        try:
+            doc.canvas().fill(mc)
+        except Exception:
+            pass
+
     # ★ 关键：显式激活首个可绘制节点，避免后续 activeNode() 返回 None
     root = doc.rootNode()
     children = root.childNodes() if root else []

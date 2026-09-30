@@ -2,7 +2,7 @@
 # get_node_pixels / list_channels / get_channel_pixels / set_channel_pixels /
 # get_selection_pixels / set_selection_pixels / selection_op
 from krita import Krita, Selection
-from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QRect, QUuid
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QRect, QUuid, Qt
 from PyQt6.QtGui import QImage
 
 import base64
@@ -80,7 +80,7 @@ def _region(params: dict, w: int, h: int) -> tuple:
 # ---------------------------------------------------------------- 节点像素
 
 def get_node_pixels(params: dict) -> dict:
-    """读取单图层矩形像素 → PNG(base64)。"""
+    """读取单图层矩形像素 → PNG(base64)。支持 max_side 降采样。"""
     doc = _doc(params)
     node = _node(doc, params.get("node_id"))
     x, y, w, h = _region(params, doc.width(), doc.height())
@@ -89,8 +89,14 @@ def get_node_pixels(params: dict) -> dict:
         raise RuntimeError("INVALID_PARAM: 节点无可读像素")
     # 整数 RGBA 内存序 B,G,R,A ↔ ARGB32 一致，直接构造
     img = QImage(raw, w, h, w * 4, QImage.Format.Format_ARGB32).copy()
+    # max_side 降采样
+    max_side = params.get("max_side", 1024)
+    if max(img.width(), img.height()) > max_side:
+        scale = max_side / float(max(img.width(), img.height()))
+        img = img.scaled(int(img.width() * scale), int(img.height() * scale),
+                         Qt.KeepAspectRatio)
     return {"image_b64": _img_to_png_b64(img), "mime_type": "image/png",
-            "region": {"x": x, "y": y, "width": w, "height": h},
+            "region": {"x": x, "y": y, "width": img.width(), "height": img.height()},
             "content_has_alpha": img.format() == QImage.Format.Format_ARGB32}
 
 
@@ -165,8 +171,16 @@ def _selection_bounds(sel):
 
 
 def get_selection_pixels(params: dict) -> dict:
-    """当前选区 → 灰度蒙版 PNG。无选区返回全黑。"""
-    doc = _doc(params)
+    """当前选区 → 灰度蒙版 PNG。无选区返回全黑。支持 document_id 定位文档。"""
+    app = Krita.instance()
+    if params.get("document_id"):
+        doc = next((d for d in app.documents()
+                    if (d.fileName() or f"untitled_{id(d)}") == params["document_id"]),
+                   None)
+        if doc is None:
+            raise RuntimeError(f"INVALID_PARAM: 找不到文档 {params['document_id']}")
+    else:
+        doc = _doc(params)
     sel = doc.selection()
     x, y, w, h = _region(params, doc.width(), doc.height())
     if sel is None:

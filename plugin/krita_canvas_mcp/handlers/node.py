@@ -84,8 +84,8 @@ def _node_tag(node) -> str:
         return node.name()
 
 
-def _walk(node, out: dict, depth: int = 0):
-    """递归导出节点树信息。"""
+def _walk(node, out: dict, depth: int = 0, recursive: bool = True):
+    """导出节点树信息。recursive=False 时只输出直接子节点基本信息。"""
     out["name"] = node.name()
     out["type"] = node.type()
     out["uuid"] = _node_tag(node)
@@ -98,24 +98,31 @@ def _walk(node, out: dict, depth: int = 0):
     children = node.childNodes()
     out["child_count"] = len(children)
     out["children"] = []
-    for c in children:
-        cc = {}
-        _walk(c, cc, depth + 1)
-        out["children"].append(cc)
+    if recursive:
+        for c in children:
+            cc = {}
+            _walk(c, cc, depth + 1, recursive=True)
+            out["children"].append(cc)
+    else:
+        for c in children:
+            cc = {"name": c.name(), "type": c.type(), "uuid": _node_tag(c),
+                  "visible": c.visible(), "opacity": c.opacity()}
+            out["children"].append(cc)
 
 
 def get_node_tree(params: dict) -> dict:
-    """完整图层树（递归）。"""
+    """图层树（支持 recursive 控制是否递归输出子节点）。"""
     doc = _active_doc(params)
+    recursive = params.get("recursive", True)
     root = doc.rootNode()
     tree = {}
-    _walk(root, tree)
+    _walk(root, tree, recursive=recursive)
     return {"document_id": doc.fileName() or "untitled", "tree": tree}
 
 
 def create_node(params: dict) -> dict:
     """创建图层/蒙版并挂到父节点（可指定插入位置与激活）。
-    filelayer 类型需要 file_path。"""
+    filelayer 类型需要 file_path。fill_color 可为 paintlayer/colorizemask 设置初始填充色。"""
     doc = _active_doc(params)
     name = params["name"]
     ntype = params["node_type"]
@@ -128,6 +135,18 @@ def create_node(params: dict) -> dict:
         node = doc.createNode(name, ntype)
     if node is None:
         raise RuntimeError(f"INVALID_PARAM: 创建节点失败 {ntype}")
+
+    # 可选初始填充色
+    fill_color = params.get("fill_color")
+    if fill_color and ntype in ("paintlayer", "colorizemask"):
+        from PyQt6.QtGui import QColor
+        from krita import ManagedColor
+        vals = [float(v) for v in fill_color[:4]]
+        if max(vals) <= 1.0:
+            vals = [v * 255.0 for v in vals]
+        r, g, b, a = (int(round(v)) for v in vals)
+        mc = ManagedColor.fromQColor(QColor(r, g, b, a))
+        node.fillNode(mc)
 
     parent = _resolve_node(doc, params.get("parent_id", "root"))
     above_id = params.get("above_id")
