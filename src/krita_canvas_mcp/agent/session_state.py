@@ -173,7 +173,7 @@ class CanvasMetrics:
         if max(w, h) > max_side:
             scale = max_side / max(w, h)
             img = img.resize((int(w * scale), int(h * scale)))
-        from .glm_client import pil_to_b64
+        from .vlm_client import pil_to_b64
         return pil_to_b64(img), img.size[0], img.size[1]
 
 

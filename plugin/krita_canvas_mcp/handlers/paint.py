@@ -205,10 +205,13 @@ def check_paintability(params: dict) -> dict:
 
 
 def wait_for_done(params: dict) -> dict:
-    """阻塞至后台笔刷任务完成（可选刷新投影合成），支持超时控制。"""
+    """阻塞至后台笔刷任务完成（可选刷新投影合成）。"""
     doc = _active_doc(params)
-    timeout_ms = params.get("timeout_ms", 60000)
-    doc.waitForDone(timeout_ms)
+    # Krita 6.x waitForDone() 不接受参数；尝试带超时参数的签名，失败则无参调用
+    try:
+        doc.waitForDone(60000)
+    except TypeError:
+        doc.waitForDone()
     if params.get("refresh_projection", True):
         doc.refreshProjection()
     return {"synced": True}

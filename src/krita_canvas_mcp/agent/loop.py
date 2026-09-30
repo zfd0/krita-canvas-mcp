@@ -19,11 +19,12 @@ from PIL import Image
 
 from ..bridge import DEFAULT_ENDPOINT, KritaBridge
 from ..errors import ErrCode, KritaError
+from ..prompts import load_system_prompt
 from .context_builder import (ParseError, build_plan_prompt, build_user_text,
-                              load_system_prompt, parse_action)
-from .glm_client import DEFAULT_MODEL, GLMError, GLMVisionClient, pil_to_b64
+                              parse_action)
 from .session_state import ActionRecord, CanvasMetrics, SessionState
 from .stage_rules import STAGE_NAMES, validate, validate_next_stage
+from .vlm_client import VLMClient, VLMError, pil_to_b64
 
 # 快照缩放上限（控制多模态体积）
 SNAPSHOT_MAX_SIDE = 768
@@ -33,10 +34,11 @@ HEATMAP_STAGES = {"C", "D"}
 
 
 class AgentLoop:
-    """闭环绘画循环。依赖：Krita 插件 HTTP RPC 运行中 + GLM API 可用。"""
+    """闭环绘画循环。依赖：Krita 插件 HTTP RPC 运行中 + 任意 VLM API 可用。"""
 
     def __init__(self, target_path: str, api_key: str | None = None,
-                 model: str | None = None, max_iterations: int = 200,
+                 model: str | None = None, base_url: str | None = None,
+                 max_iterations: int = 200,
                  out_dir: str = "outputs",
                  endpoint: str = DEFAULT_ENDPOINT,
                  plan_retries: int = 2,
@@ -46,8 +48,8 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.out_dir = out_dir
         self.bridge = KritaBridge(endpoint=endpoint)
-        self.glm = GLMVisionClient(api_key=api_key,
-                                   model=model or DEFAULT_MODEL)
+        self.vlm = VLMClient(base_url=base_url, api_key=api_key,
+                             model=model)
         self.plan_retries = plan_retries
         self.system = load_system_prompt()
         self.state = SessionState(out_dir=out_dir)
@@ -89,23 +91,23 @@ class AgentLoop:
     # ------------------------------------------------------------ LLM 交互
 
     def _ask(self, text: str, images: list[dict], retries: int = 2) -> str:
-        """调 GLM 取回原始文本。
+        """调 VLM 取回原始文本。
 
-        网络/API 错误按指数退避重试（3s、6s），全部失败后抛 GLMError
+        网络/API 错误按指数退避重试（3s、6s），全部失败后抛 VLMError
         由调用方决定降级（plan 轮重试 / 迭代轮计数后保存退出）。
         """
-        last_err: GLMError | None = None
+        last_err: VLMError | None = None
         for attempt in range(retries + 1):
             try:
-                raw = self.glm.chat(self.system, text, images)
+                raw = self.vlm.chat(self.system, text, images)
                 if self.raw_output:
                     print(f"[agent][raw] {raw}")
                 return raw
-            except GLMError as e:
+            except VLMError as e:
                 last_err = e
                 if attempt < retries:
                     wait = 3 * (2 ** attempt)
-                    print(f"[agent] GLM 调用失败({e})，{wait}s 后重试 "
+                    print(f"[agent] VLM 调用失败({e})，{wait}s 后重试 "
                           f"{attempt + 1}/{retries}")
                     time.sleep(wait)
         assert last_err is not None
@@ -194,7 +196,7 @@ class AgentLoop:
         canvas_w, canvas_h = int(doc["width"]), int(doc["height"])
         work_w, work_h = self._work_size(canvas_w, canvas_h)
         print(f"[agent] 画布 {canvas_w}x{canvas_h} (工作尺寸 {work_w}x{work_h}) | "
-              f"目标 {self.target_path} | 模型 {self.glm.model}")
+              f"目标 {self.target_path} | 模型 {self.vlm.model}")
 
         # 1) 加载目标图并对齐
         target_arr = self._load_target(work_w, work_h)
@@ -216,7 +218,7 @@ class AgentLoop:
                 plan = act
                 print(f"[agent] plan 就绪: {plan.get('composition', '')[:40]}")
                 break
-            except (ParseError, GLMError) as e:
+            except (ParseError, VLMError) as e:
                 plan_err = f"plan 失败: {e}"
                 print(f"[agent] {plan_err}（重试 {attempt + 1}/{self.plan_retries}）")
         if plan is None:
@@ -228,7 +230,7 @@ class AgentLoop:
         sample_result = None
         stop_reason = "loop_exit"
         scalars: dict = {}
-        glm_fail_streak = 0
+        vlm_fail_streak = 0
 
         while True:
             self.state.iteration += 1
@@ -277,17 +279,17 @@ class AgentLoop:
                 feedback = [str(e), "请严格输出单一 JSON 对象"]
                 print(f"[agent] iter {it}: 输出解析失败 - {e}")
                 continue
-            except GLMError as e:
+            except VLMError as e:
                 # _ask 内部已退避重试；到这表示连续多轮 API 不可用
-                glm_fail_streak += 1
-                print(f"[agent] iter {it}: GLM 连续失败 {glm_fail_streak} 次 - {e}")
-                if glm_fail_streak >= 3:
-                    stop_reason = "glm_failed"
+                vlm_fail_streak += 1
+                print(f"[agent] iter {it}: VLM 连续失败 {vlm_fail_streak} 次 - {e}")
+                if vlm_fail_streak >= 3:
+                    stop_reason = "vlm_failed"
                     break
-                feedback = [f"GLM 调用失败: {e}，本轮跳过"]
+                feedback = [f"VLM 调用失败: {e}，本轮跳过"]
                 time.sleep(3)
                 continue
-            glm_fail_streak = 0  # 成功解析，重置连续失败计数
+            vlm_fail_streak = 0  # 成功解析，重置连续失败计数
 
             # ---- 动作分发 ----
             kind = action.get("action")

@@ -6,7 +6,8 @@
 前置条件:
     1. Krita 已打开并启用 krita_canvas_mcp 插件(127.0.0.1:5678/rpc)
     2. （可选）画布(活动文档)已按目标图尺寸新建；若无活动文档则自动创建
-    3. GLM API Key 通过环境变量 GLM_API_KEY 或 --api-key 传入
+    3. VLM 配置（base_url / api_key / model）来自项目根 .env，缺失会报错；
+       也可用环境变量或 --base-url / --api-key / --model 覆盖
 """
 import argparse
 
@@ -19,8 +20,12 @@ def main() -> None:
     parser.add_argument("--target", required=True, help="目标图像路径")
     parser.add_argument("--max-iterations", type=int, default=200,
                         help="迭代上限")
-    parser.add_argument("--api-key", default=None, help="GLM API Key(缺省用环境变量/内置)")
-    parser.add_argument("--model", default=None, help="模型名(默认 glm-4.6v-flash)")
+    parser.add_argument("--api-key", default=None,
+                        help="VLM API Key(缺省从 .env / 环境变量读取)")
+    parser.add_argument("--model", default=None,
+                        help="模型名(缺省从 .env / 环境变量读取)")
+    parser.add_argument("--base-url", default=None,
+                        help="OpenAI 兼容接口根地址(缺省从 .env / 环境变量读取)")
     parser.add_argument("--raw-output", action="store_true",
                         help="打印 AI 原始输出文本（便于调试）")
     parser.add_argument("--confirm", action="store_true",
@@ -34,6 +39,7 @@ def main() -> None:
         target_path=args.target,
         api_key=args.api_key,
         model=args.model,
+        base_url=args.base_url,
         max_iterations=args.max_iterations,
         out_dir=args.out_dir,
         endpoint=args.endpoint or "http://127.0.0.1:5678/rpc",
