@@ -205,7 +205,7 @@
     },
     {
       "name": "sample_color",
-      "description": "从目标图/画布/图层采样颜色，返回多种色彩空间表示。AI调色的事实来源，防漂移",
+      "description": "从目标图/画布/图层采样颜色，返回多种色彩空间表示。AI调色的事实来源，防漂移。source=target 采样后该颜色会自动成为当前前景色（可直接省略 color 绘制，或把返回的 srgb_hex 填入 color）",
       "inputSchema": {
         "type": "object",
         "properties": {

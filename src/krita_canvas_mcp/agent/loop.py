@@ -22,7 +22,8 @@ from ..errors import ErrCode, KritaError
 from ..prompts import load_system_prompt
 from .context_builder import (ParseError, build_plan_prompt, build_user_text,
                               parse_action)
-from .session_state import ActionRecord, CanvasMetrics, SessionState
+from .session_state import (PAINT_TOOLS, ActionRecord, CanvasMetrics,
+                            SessionState)
 from .stage_rules import (MIN_ACTIONS, STAGE_NAMES, STAGE_SEQ, validate,
                           validate_next_stage)
 from .vlm_client import VLMClient, VLMError, pil_to_b64
@@ -64,6 +65,8 @@ class AgentLoop:
         self.raw_output = raw_output    # True 时打印 AI 原始响应文本
         self.confirm = confirm          # True 时每步执行前等待用户确认
         self.enable_thinking = enable_thinking  # True 时启用思考模式（Agnes 模型）
+        # 上一轮是否为真实绘画动作：停滞只在绘画轮累计（采样/计划轮不计入）
+        self._prev_paint = False
 
     # ------------------------------------------------------------ 初始化
 
@@ -224,6 +227,15 @@ class AgentLoop:
             result = self._sample_target(
                 int(params.get("x", 0)), int(params.get("y", 0)),
                 int(params.get("radius", 0)), params.get("reduce", "median"))
+            # 采样色自动设为前景色：模型可直接绘制（省略 color 字段），
+            # 避免“采样到蓝色却用旧色 c1(草稿灰) 下笔”这类串色问题
+            hexv = (result.get("color") or {}).get("srgb_hex")
+            if hexv:
+                self.bridge.call("set_colors", {"foreground": hexv})
+                self.state.ledger.record(hexv)
+                executed.append(("set_colors(auto)", hexv))
+                result["note"] = ("已自动设为当前前景色：可直接省略 color 字段绘制，"
+                                  "或将该 #hex 填入 color")
         else:
             if tool in ("paint_line", "paint_path", "paint_shape"):
                 params = self._scale_paint_params(tool, params)
@@ -331,7 +343,11 @@ class AgentLoop:
             progress = painted if primary == "painted" else cov
             region_rows = metrics.by_regions(
                 (self.state.plan or {}).get("regions", []), metric=primary)
-            stall = self.state.update_stall(progress, self.state.stage)
+            # 停滞只在“上一轮是真实绘画动作”时累计：采样/计划/被拒等不改画布
+            # 的轮次不计入，避免 C 阶段连续采样期间被误判停滞
+            stall = (self.state.update_stall(progress, self.state.stage)
+                     if self._prev_paint else self.state.stall_rounds)
+            self._prev_paint = False  # 本轮成功绘画会在下方执行分支重新置位
 
             stall_note = None
             if stall >= 3:
@@ -455,7 +471,8 @@ class AgentLoop:
             stage_decl = action.get("stage", self.state.stage)
             color_token = action.get("color")
             ok_, err_ = validate(stage_decl, tool, action.get("params", {}),
-                                 self.state.ledger.resolve(color_token) if color_token else None)
+                                 self.state.ledger.resolve(color_token) if color_token else None,
+                                 color_token=color_token)
             if not ok_:
                 feedback = [err_]
                 self._log(it, self.state.stage, tool, {"err": err_},
@@ -477,6 +494,8 @@ class AgentLoop:
             self._log(it, self.state.stage, tool, res["digest"],
                       action.get("thought", ""), True, res["elapsed_ms"],
                       color=color_token or "")
+            # 记录本轮为真实绘画动作（供下一轮停滞判决使用）
+            self._prev_paint = tool in PAINT_TOOLS
             if tool == "sample_color":
                 try:
                     sample_result = res["result"]

@@ -87,8 +87,11 @@ RULES = {
 
 
 def validate(stage: str, tool: str, params: dict,
-             color: str | None = None) -> tuple:
+             color: str | None = None,
+             color_token: str | None = None) -> tuple:
     """阶段硬约束校验。
+    :param color:       已解析的 #RRGGBB（供灰度/颜色类校验使用）
+    :param color_token: 动作里的原始颜色引用（c1/c2/#hex），用于识别遗留色槽
     :return: (ok: bool, err: str|None)
     """
     if stage not in RULES:
@@ -98,6 +101,14 @@ def validate(stage: str, tool: str, params: dict,
         return False, (f"STAGE_{stage}_TOOL_FORBIDDEN: "
                        f"阶段 {stage}({STAGE_NAMES[stage]}) 不允许使用 {tool}，"
                        f"允许: {sorted(allowed)}")
+    # C/D 颜色阶段禁止引用 c1/c2：它们在 A/B 阶段几乎总是草稿灰残留，
+    # 模型采样到正确色后仍写 c1 会导致“采样蓝、下笔灰”的串色问题
+    if (stage in ("C", "D") and tool and tool.startswith("paint")
+            and (color_token or "").lower() in ("c1", "c2")):
+        return False, (f"STAGE_{stage}_LEGACY_COLOR: {stage} 阶段禁止用 "
+                       f"{color_token} 填色（多为 A/B 草稿灰）。"
+                       f"请省略 color 字段（沿用最近采样色），"
+                       f"或使用采样返回的 #RRGGBB")
     return check(tool, params, color)
 
 

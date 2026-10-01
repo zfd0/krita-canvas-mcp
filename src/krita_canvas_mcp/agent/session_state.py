@@ -26,6 +26,11 @@ _WHITE = np.array([0.95047, 1.0, 1.08883], dtype=np.float64)
 
 # “已下笔”判定：像素任一通道比纯白暗超过该值即视为画布上已落笔
 INK_LEVEL = 20
+# 目标前景判定：目标像素任一通道比纯白暗超过该值视为前景内容（排除白背景）
+FG_LEVEL = 20
+
+# 计入阶段动作配额的"真实绘画动作"；sample_color/set_* 等辅助动作不占门槛
+PAINT_TOOLS = {"paint_path", "paint_line", "paint_shape", "write_pixels"}
 
 # 区域状态阈值：匹配度（C/D，ΔE<6 占比）与已绘占比（A/B）分开，
 # 因为 A/B 阶段线条笔画天然只覆盖区域内一小部分像素，用匹配度阈值会永远 pending
@@ -105,6 +110,10 @@ class CanvasMetrics:
         # 已下笔掩码：相对纯白的暗化像素（笔画落在白底画布上的位置）
         self.ink_mask = ((255 - canvas_rgb.astype(np.int16).min(axis=-1))
                          > INK_LEVEL)
+        # 目标前景掩码：目标非白像素。白背景与白画布天然 ΔE≈0，若计入
+        # 匹配度会虚高（未动笔的区域也显示 0.8+），故匹配统计只看前景
+        self.fg_mask = ((255 - target_rgb.astype(np.int16).min(axis=-1))
+                        > FG_LEVEL)
 
     # ---- 标量 ----
     def scalars(self) -> dict:
@@ -122,11 +131,16 @@ class CanvasMetrics:
         }
 
     def covered_pct(self, threshold: float = 6.0) -> float:
-        """全图匹配度：ΔE 低于阈值的像素占比（与 by_regions 同口径）。
+        """全图匹配度：目标前景像素中 ΔE 低于阈值的占比。
 
-        衡量“颜色贴合”，随绘制的准确度上涨，C/D 阶段的主指标。
+        只统计目标非白（前景内容）像素——白背景与白画布天然匹配，
+        计入会虚高（未动笔的区域也显示 0.8+），对 C/D 阶段有误导性。
+        衡量“颜色贴合”，C/D 阶段的主指标。
         """
-        return float((self.delta_e < threshold).mean())
+        fg = self.fg_mask
+        if not fg.any():
+            return 1.0
+        return float((self.delta_e[fg] < threshold).mean())
 
     def painted_pct(self) -> float:
         """全图已绘占比：画布上相对白底已落笔的像素占比。
@@ -198,7 +212,10 @@ class CanvasMetrics:
                              "painted_pct": 0.0, "status": "pending"})
                 continue
             sub_de = self.delta_e[y:y + h, x:x + w]
-            cov = float((sub_de < threshold).mean())
+            sub_fg = self.fg_mask[y:y + h, x:x + w]
+            # 匹配度只看目标前景像素（排除与该区域重叠的白背景，避免虚高）
+            cov = (float((sub_de[sub_fg] < threshold).mean())
+                   if sub_fg.any() else 0.0)
             ink = float(self.ink_mask[y:y + h, x:x + w].mean())
             primary = ink if metric == "painted" else cov
             rows.append({"id": rid, "name": name,
@@ -278,9 +295,6 @@ STAGE_SEQ = ["A", "B", "C", "D"]
 # 各阶段最少动作数（next_stage 校验用，低于该值拒绝切换）
 MIN_ACTIONS = {"A": 8, "B": 8, "C": 6, "D": 6}
 
-# 计入阶段动作配额的"真实绘画动作"；sample_color/set_* 等辅助动作不占门槛
-_PAINT_TOOLS = {"paint_path", "paint_line", "paint_shape", "write_pixels"}
-
 # 阶段停滞增益阈值：入参 progress 为阶段主指标（A/B=已绘占比，C/D=匹配度）。
 # A/B 单笔线条对已绘占比的增量约为 0.1%~1%，阈值取小即可灵敏判定停滞；
 # C/D 匹配度增长更集中，阈值取大一些。
@@ -307,7 +321,7 @@ class SessionState:
     def record_action(self, rec: ActionRecord):
         self.history.append(rec)
         # 仅真实绘画动作计入阶段配额；sample_color/set_* 等辅助动作与失败动作不占门槛
-        if rec.ok and rec.tool in _PAINT_TOOLS:
+        if rec.ok and rec.tool in PAINT_TOOLS:
             self.stage_actions[self.stage] += 1
         try:
             import os

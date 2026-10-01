@@ -200,7 +200,7 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
     lines.append("--- 进度摘要 ---")
     pri_label = ("已绘(主指标·A/B看结构推进)" if primary == "painted"
                  else "匹配(主指标·C/D看颜色贴合)")
-    lines.append(f"painted 已绘: {painted:.3f}   covered 匹配(ΔE<6): {cov:.3f}   "
+    lines.append(f"painted 已绘: {painted:.3f}   covered 匹配(前景ΔE<6): {cov:.3f}   "
                  f"主指标: {pri_label}")
     lines.append(f"delta_e_mean: {metrics.get('delta_e_mean', '?')}   "
                  f"ssim: {metrics.get('ssim', '?')}")
