@@ -57,10 +57,28 @@ def _style(s):
     return s or "ForegroundColor"
 
 
+def _apply_size(params: dict) -> None:
+    """paint_* 直接携带 size 时，先落地为当前画笔尺寸（走活动视图）。"""
+    if "size" not in params:
+        return
+    app = Krita.instance()
+    win = app.activeWindow()
+    if win is None:
+        return
+    view = win.activeView()
+    if view is None:
+        views = win.views()
+        view = views[0] if views else None
+    if view is None:
+        return
+    view.setBrushSize(float(params["size"]))
+
+
 def paint_line(params: dict) -> dict:
     """两点直线，可带首尾压感。auto_sync=False 时跳过内部同步。"""
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
+    _apply_size(params)
     node.paintLine(
         QPoint(int(params["x1"]), int(params["y1"])),
         QPoint(int(params["x2"]), int(params["y2"])),
@@ -106,6 +124,7 @@ def paint_path(params: dict) -> dict:
     path = _build_path(params["points"],
                        params.get("smooth", True),
                        params.get("closed", False))
+    _apply_size(params)
     node.paintPath(
         path,
         _style(params.get("stroke_style")),
@@ -122,6 +141,7 @@ def paint_shape(params: dict) -> dict:
     doc = _active_doc(params)
     node = _resolve_node(doc, params.get("node_id"))
     shape = params["shape"]
+    _apply_size(params)
     stroke = _style(params.get("stroke_style", "None"))
     fill = _style(params.get("fill_style", "ForegroundColor"))
 
@@ -207,11 +227,8 @@ def check_paintability(params: dict) -> dict:
 def wait_for_done(params: dict) -> dict:
     """阻塞至后台笔刷任务完成（可选刷新投影合成）。"""
     doc = _active_doc(params)
-    # Krita 6.x waitForDone() 不接受参数；尝试带超时参数的签名，失败则无参调用
-    try:
-        doc.waitForDone(60000)
-    except TypeError:
-        doc.waitForDone()
+    # Krita 6.x waitForDone() 不接受参数
+    doc.waitForDone()
     if params.get("refresh_projection", True):
         doc.refreshProjection()
     return {"synced": True}

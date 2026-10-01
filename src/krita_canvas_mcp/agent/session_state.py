@@ -24,6 +24,16 @@ _SRGB = np.array([
 ], dtype=np.float64)
 _WHITE = np.array([0.95047, 1.0, 1.08883], dtype=np.float64)
 
+# “已下笔”判定：像素任一通道比纯白暗超过该值即视为画布上已落笔
+INK_LEVEL = 20
+
+# 区域状态阈值：匹配度（C/D，ΔE<6 占比）与已绘占比（A/B）分开，
+# 因为 A/B 阶段线条笔画天然只覆盖区域内一小部分像素，用匹配度阈值会永远 pending
+STATUS_THRESHOLDS = {
+    "matched": {"done": 0.9, "active": 0.75, "warm": 0.5, "hot": 0.3},
+    "painted": {"done": 0.30, "active": 0.18, "warm": 0.08, "hot": 0.03},
+}
+
 
 def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     """形状 (...,3) 的 uint8 RGB → CIELAB(D65)。向量化。"""
@@ -91,6 +101,10 @@ class CanvasMetrics:
         lab_t = _rgb_to_lab(target_rgb.astype(np.float64))
         lab_c = _rgb_to_lab(canvas_rgb.astype(np.float64))
         self.delta_e = np.sqrt(((lab_t - lab_c) ** 2).sum(axis=-1))
+        self._target_lab = lab_t
+        # 已下笔掩码：相对纯白的暗化像素（笔画落在白底画布上的位置）
+        self.ink_mask = ((255 - canvas_rgb.astype(np.int16).min(axis=-1))
+                         > INK_LEVEL)
 
     # ---- 标量 ----
     def scalars(self) -> dict:
@@ -108,8 +122,19 @@ class CanvasMetrics:
         }
 
     def covered_pct(self, threshold: float = 6.0) -> float:
-        """与目标颜色接近(ΔE<阈值)的像素占比，作为进度覆盖度。"""
+        """全图匹配度：ΔE 低于阈值的像素占比（与 by_regions 同口径）。
+
+        衡量“颜色贴合”，随绘制的准确度上涨，C/D 阶段的主指标。
+        """
         return float((self.delta_e < threshold).mean())
+
+    def painted_pct(self) -> float:
+        """全图已绘占比：画布上相对白底已落笔的像素占比。
+
+        A/B 结构阶段的主指标——灰/蓝细线对目标色 ΔE 很大，匹配度几乎不动，
+        而已绘占比能如实反映“结构是否在推进”。
+        """
+        return float(self.ink_mask.mean())
 
     # ---- 热点 ----
     def hotspots(self, top_k: int = 8, block: int = 64) -> list[dict]:
@@ -131,37 +156,56 @@ class CanvasMetrics:
         return out[:top_k]
 
     # ---- 区域统计 ----
-    def by_regions(self, regions: list[dict], threshold: float = 6.0,
-                   status_map: dict | None = None) -> list[dict]:
-        """按 plan 的 regions bbox 统计覆盖度与状态。
-        状态边界对齐草稿口径：≥0.9 done / ≥0.75 active / ≥0.5 warm / ≥0.3 hot / 其余 pending。
+    def by_regions(self, regions: list[dict], metric: str = "matched",
+                   threshold: float = 6.0) -> list[dict]:
+        """按 plan 的 regions bbox 统计进度与状态。
+
+        metric="matched"：以 ΔE<threshold 占比为主指标（C/D 颜色贴合）；
+        metric="painted"：以已绘像素占比为主指标（A/B 结构推进）。
+        行内同时保留 covered_pct(匹配) 与 painted_pct(已绘)，主指标决定 status。
         """
-        status_map = status_map or {"done": 0.9, "active": 0.75,
-                                    "warm": 0.5, "hot": 0.3}
+        status_map = STATUS_THRESHOLDS.get(metric, STATUS_THRESHOLDS["matched"])
         rows = []
+
+        def _status(pct: float) -> str:
+            if pct >= status_map["done"]:
+                return "done"
+            if pct >= status_map["active"]:
+                return "active"
+            if pct >= status_map["warm"]:
+                return "warm"
+            if pct >= status_map["hot"]:
+                return "hot"
+            return "pending"
+
         for r in regions:
-            x, y, w, h = r["bbox"]
+            rid, name = r.get("id", "?"), r.get("name", "")
+            bbox = r.get("bbox")
+            # 防御：容错模型偶发的双层嵌套 [[x,y,w,h]]
+            if (isinstance(bbox, (list, tuple)) and len(bbox) == 1
+                    and isinstance(bbox[0], (list, tuple))):
+                bbox = bbox[0]
+            try:
+                x, y, w, h = bbox
+            except (TypeError, ValueError):
+                rows.append({"id": rid, "name": name, "covered_pct": 0.0,
+                             "painted_pct": 0.0, "status": "pending"})
+                continue
             x, y = max(0, int(x)), max(0, int(y))
             w, h = min(int(w), self.delta_e.shape[1] - x), min(int(h), self.delta_e.shape[0] - y)
             if w <= 0 or h <= 0:
-                rows.append({"id": r["id"], "name": r.get("name", ""),
-                             "covered_pct": 0.0, "status": "pending"})
+                rows.append({"id": rid, "name": name, "covered_pct": 0.0,
+                             "painted_pct": 0.0, "status": "pending"})
                 continue
-            sub = self.delta_e[y:y + h, x:x + w]
-            cov = float((sub < threshold).mean())
-            if cov >= status_map["done"]:
-                status = "done"
-            elif cov >= status_map["active"]:
-                status = "active"
-            elif cov >= status_map["warm"]:
-                status = "warm"
-            elif cov >= status_map["hot"]:
-                status = "hot"
-            else:
-                status = "pending"
-            rows.append({"id": r["id"], "name": r.get("name", ""),
-                         "covered_pct": round(cov, 3), "status": status,
-                         "mae": round(float(sub.mean()), 3)})
+            sub_de = self.delta_e[y:y + h, x:x + w]
+            cov = float((sub_de < threshold).mean())
+            ink = float(self.ink_mask[y:y + h, x:x + w].mean())
+            primary = ink if metric == "painted" else cov
+            rows.append({"id": rid, "name": name,
+                         "covered_pct": round(cov, 3),
+                         "painted_pct": round(ink, 3),
+                         "status": _status(primary),
+                         "mae": round(float(sub_de.mean()), 3)})
         return rows
 
     # ---- 热力图 ----
@@ -234,6 +278,16 @@ STAGE_SEQ = ["A", "B", "C", "D"]
 # 各阶段最少动作数（next_stage 校验用，低于该值拒绝切换）
 MIN_ACTIONS = {"A": 8, "B": 8, "C": 6, "D": 6}
 
+# 计入阶段动作配额的"真实绘画动作"；sample_color/set_* 等辅助动作不占门槛
+_PAINT_TOOLS = {"paint_path", "paint_line", "paint_shape", "write_pixels"}
+
+# 阶段停滞增益阈值：入参 progress 为阶段主指标（A/B=已绘占比，C/D=匹配度）。
+# A/B 单笔线条对已绘占比的增量约为 0.1%~1%，阈值取小即可灵敏判定停滞；
+# C/D 匹配度增长更集中，阈值取大一些。
+STAGE_STALL_GAIN = {"A": 0.0002, "B": 0.0002, "C": 0.002, "D": 0.002}
+# 阶段停滞触发轮数：A/B 结构阶段放宽，C/D 填色光影阶段收紧
+STAGE_STALL_LIMIT = {"A": 12, "B": 12, "C": 5, "D": 5}
+
 
 @dataclass
 class SessionState:
@@ -245,20 +299,21 @@ class SessionState:
     ledger: ColorLedger = field(default_factory=ColorLedger)
     stall_rounds: int = 0
     last_covered: float = 0.0
-    stage_cov_anchor: dict = field(default_factory=dict)  # stage -> 切换时 covered
     stage_actions: dict = field(default_factory=lambda: {s: 0 for s in STAGE_SEQ})
     started_at: float = field(default_factory=time.time)
     out_dir: str = "outputs"
+    session_id: str = ""  # 会话号（同一 jsonl 跨多次运行累积，靠它区分）
 
     def record_action(self, rec: ActionRecord):
         self.history.append(rec)
-        # 特殊动作与失败动作不占用阶段动作配额（next_stage 门槛只数真实成功的绘画动作）
-        if rec.ok and rec.tool not in ("done", "next_stage", "plan"):
+        # 仅真实绘画动作计入阶段配额；sample_color/set_* 等辅助动作与失败动作不占门槛
+        if rec.ok and rec.tool in _PAINT_TOOLS:
             self.stage_actions[self.stage] += 1
         try:
             import os
             os.makedirs(self.out_dir, exist_ok=True)
-            payload = json.dumps(rec.__dict__, ensure_ascii=False, default=str)
+            payload = json.dumps({**rec.__dict__, "session": self.session_id},
+                                 ensure_ascii=False, default=str)
             with open(self._history_path(), "a", encoding="utf-8") as f:
                 f.write(payload + "\n")
         except Exception:
@@ -269,25 +324,36 @@ class SessionState:
         return os.path.join(self.out_dir, "action_history.jsonl")
 
     # ---- 停滞检测 ----
-    def update_stall(self, covered: float, gain_threshold: float = 0.002) -> int:
-        """更新停滞计数：covered 改善低于阈值累加，否则清零。"""
-        if covered - self.last_covered < gain_threshold:
+    def update_stall(self, progress: float, stage: str = "C") -> int:
+        """更新停滞计数：progress（阶段主指标）改善低于阶段阈值累加，否则清零。
+
+        A/B 传已绘占比（painted_pct），C/D 传匹配度（covered_pct），
+        调用方负责按 stage 选取对应指标；切阶段时应调用 reset_stall 重置基准。
+        """
+        gain_threshold = STAGE_STALL_GAIN.get(stage, 0.002)
+        if progress - self.last_covered < gain_threshold:
             self.stall_rounds += 1
         else:
             self.stall_rounds = 0
-        self.last_covered = covered
+        self.last_covered = progress
         return self.stall_rounds
 
+    def reset_stall(self, progress: float) -> None:
+        """阶段切换后重置停滞基准（progress 用新阶段的主指标），避免跨阶段连带误判。"""
+        self.stall_rounds = 0
+        self.last_covered = progress
+
     # ---- 终止判定 ----
-    def conclude(self, done: bool, metrics: dict, max_iter: int) -> tuple:
-        """返回 (stop: bool, reason: str|None)。"""
+    def conclude(self, done: bool, metrics: dict, max_iter: int,
+                 stage: str = "C") -> tuple:
+        """返回 (stop: bool, reason: str|None)。停滞阈值按阶段区分。"""
         if done:
             return True, "llm_done"
         if self.iteration >= max_iter:
             return True, "max_iter"
         if metrics["delta_e_mean"] < 4.0 and metrics["ssim"] > 0.92:
             return True, "converged"
-        if self.stall_rounds >= 5:
+        if self.stall_rounds >= STAGE_STALL_LIMIT.get(stage, 5):
             return True, "stalled"
         return False, None
 

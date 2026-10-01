@@ -95,11 +95,13 @@ class VLMClient:
         return {"type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{image_b64}"}}
 
-    def chat(self, system: str, text: str, images: list[dict] | None = None) -> str:
+    def chat(self, system: str, text: str, images: list[dict] | None = None,
+             enable_thinking: bool = False) -> str:
         """一次多模态对话。
         :param system: system prompt
         :param text:   用户文本（会话状态+指令）
         :param images: [{"image_b64": ..., "mime": ...}, ...] 按序插入文本前
+        :param enable_thinking: 是否启用思考模式（Agnes 模型专用）
         :return: assistant 文本内容
         """
         content = [self._image_part(im["image_b64"], im.get("mime", "image/png"))
@@ -116,6 +118,10 @@ class VLMClient:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        # Agnes 模型支持思考模式
+        if enable_thinking and "agnes" in self.model.lower():
+            body["chat_template_kwargs"] = {"enable_thinking": True}
+
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
             resp = self._client.post(

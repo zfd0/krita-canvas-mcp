@@ -31,18 +31,22 @@ def _grayish(hexv: str) -> bool:
 
 
 def _check_a(tool: str, params: dict, color: str | None):
-    if tool == "paint_shape" and params.get("fill_style") not in (None, "None"):
-        return False, "STAGE_A_NO_FILL: 草图阶段禁止填充色块"
+    if tool in ("paint_path", "paint_shape") and \
+            params.get("fill_style") not in (None, "None"):
+        return False, ("STAGE_A_NO_FILL: 草图阶段禁止填充色块"
+                       "（paint_path 的 fill_style 必须为 None）")
     if color and not _grayish(color):
         return False, "STAGE_A_GRAY_ONLY: 草图阶段仅允许灰/蓝色"
-    if tool == "set_brush_params" and params.get("size") is not None \
+    if tool in ("set_brush_params", "paint_path", "paint_line") \
+            and params.get("size") is not None \
             and not (4 <= float(params["size"]) <= 12):
         return False, "STAGE_A_BRUSH_SIZE: 草图阶段笔刷 size 应为 4~12"
     return True, None
 
 
 def _check_b(tool: str, params: dict, color: str | None):
-    if tool == "set_brush_params" and params.get("size") is not None \
+    if tool in ("set_brush_params", "paint_path", "paint_line") \
+            and params.get("size") is not None \
             and float(params["size"]) > 3:
         return False, "STAGE_B_TOO_THICK: 线稿阶段笔刷 size 应 ≤3"
     if tool in ("paint_path", "paint_shape") and \

@@ -23,7 +23,8 @@ from ..prompts import load_system_prompt
 from .context_builder import (ParseError, build_plan_prompt, build_user_text,
                               parse_action)
 from .session_state import ActionRecord, CanvasMetrics, SessionState
-from .stage_rules import STAGE_NAMES, validate, validate_next_stage
+from .stage_rules import (MIN_ACTIONS, STAGE_NAMES, STAGE_SEQ, validate,
+                          validate_next_stage)
 from .vlm_client import VLMClient, VLMError, pil_to_b64
 
 # 快照缩放上限（控制多模态体积）
@@ -42,8 +43,10 @@ class AgentLoop:
                  out_dir: str = "outputs",
                  endpoint: str = DEFAULT_ENDPOINT,
                  plan_retries: int = 2,
+                 max_retries: int | None = None,
                  raw_output: bool = False,
-                 confirm: bool = False):
+                 confirm: bool = False,
+                 enable_thinking: bool = False):
         self.target_path = target_path
         self.max_iterations = max_iterations
         self.out_dir = out_dir
@@ -51,13 +54,16 @@ class AgentLoop:
         self.vlm = VLMClient(base_url=base_url, api_key=api_key,
                              model=model)
         self.plan_retries = plan_retries
+        self.max_retries = max_retries  # VLM 调用失败重试次数；None=无限
         self.system = load_system_prompt()
         self.state = SessionState(out_dir=out_dir)
         os.makedirs(out_dir, exist_ok=True)
         self.session_id = time.strftime("%Y%m%d_%H%M%S")
+        self.state.session_id = self.session_id  # 动作历史带会话号，便于多轮运行区分
         # 可选开关
         self.raw_output = raw_output    # True 时打印 AI 原始响应文本
         self.confirm = confirm          # True 时每步执行前等待用户确认
+        self.enable_thinking = enable_thinking  # True 时启用思考模式（Agnes 模型）
 
     # ------------------------------------------------------------ 初始化
 
@@ -90,26 +96,35 @@ class AgentLoop:
 
     # ------------------------------------------------------------ LLM 交互
 
-    def _ask(self, text: str, images: list[dict], retries: int = 2) -> str:
+    def _ask(self, text: str, images: list[dict],
+             max_retries: int | None = None,
+             enable_thinking: bool = False) -> str:
         """调 VLM 取回原始文本。
 
-        网络/API 错误按指数退避重试（3s、6s），全部失败后抛 VLMError
-        由调用方决定降级（plan 轮重试 / 迭代轮计数后保存退出）。
+        max_retries: None=无限重试(缺省用 self.max_retries)；0=不重试；N=最多重试 N 次。
+        API 错误按指数退避重试（3s、6s、…封顶 60s），重试耗尽后抛 VLMError。
+        enable_thinking: 是否启用思考模式（Agnes 模型专用）
         """
+        if max_retries is None:
+            max_retries = self.max_retries
+        attempt = 0
         last_err: VLMError | None = None
-        for attempt in range(retries + 1):
+        while True:
             try:
-                raw = self.vlm.chat(self.system, text, images)
+                raw = self.vlm.chat(self.system, text, images, enable_thinking=enable_thinking)
                 if self.raw_output:
                     print(f"[agent][raw] {raw}")
                 return raw
             except VLMError as e:
                 last_err = e
-                if attempt < retries:
-                    wait = 3 * (2 ** attempt)
-                    print(f"[agent] VLM 调用失败({e})，{wait}s 后重试 "
-                          f"{attempt + 1}/{retries}")
-                    time.sleep(wait)
+                if max_retries is not None and attempt >= max_retries:
+                    break
+                wait = min(3 * (2 ** attempt), 60)
+                total = "无限" if max_retries is None else str(max_retries)
+                print(f"[agent] VLM 调用失败({e})，{wait}s 后重试 "
+                      f"({attempt + 1}/{total})")
+                time.sleep(wait)
+                attempt += 1
         assert last_err is not None
         raise last_err
 
@@ -132,10 +147,55 @@ class AgentLoop:
             d["preset"] = params["preset_name"]
         return d
 
+    def _to_canvas_xy(self, x, y) -> tuple:
+        """工作坐标 → 画布真实坐标（画布被缩放时按比例放大）。"""
+        sx = self.canvas_w / self.work_w
+        sy = self.canvas_h / self.work_h
+        return int(round(x * sx)), int(round(y * sy))
+
+    def _scale_paint_params(self, tool: str, params: dict) -> dict:
+        """把 LLM 输出的工作坐标还原为画布真实坐标，供 Krita 执行。"""
+        p = dict(params)
+        if tool == "paint_line":
+            if "x1" in p and "y1" in p:
+                p["x1"], p["y1"] = self._to_canvas_xy(p["x1"], p["y1"])
+            if "x2" in p and "y2" in p:
+                p["x2"], p["y2"] = self._to_canvas_xy(p["x2"], p["y2"])
+        elif tool == "paint_path":
+            if "points" in p:
+                p["points"] = [[*self._to_canvas_xy(pt[0], pt[1])] + list(pt[2:])
+                               for pt in p["points"]]
+        elif tool == "paint_shape":
+            if isinstance(p.get("rect"), dict):
+                r = dict(p["rect"])
+                r["x"], r["y"] = self._to_canvas_xy(r.get("x", 0), r.get("y", 0))
+                p["rect"] = r
+            if "points" in p:
+                p["points"] = [[*self._to_canvas_xy(pt[0], pt[1])] + list(pt[2:])
+                               for pt in p["points"]]
+        return p
+
+    def _sample_target(self, x: int, y: int, radius: int = 0,
+                       reduce: str = "median") -> dict:
+        """从目标图(target_arr, 工作坐标)直接采样颜色，无需经过 Krita。"""
+        arr = self.target_arr
+        h, w = arr.shape[:2]
+        x0, x1 = max(0, x - radius), min(w, x + radius + 1)
+        y0, y1 = max(0, y - radius), min(h, y + radius + 1)
+        if x0 >= x1 or y0 >= y1:
+            return {"x": x, "y": y, "source": "target", "error": "采样点越界"}
+        sub = arr[y0:y1, x0:x1].reshape(-1, 3)
+        rep = np.median(sub, axis=0) if reduce == "median" else sub.mean(axis=0)
+        r, g, b = [int(round(float(v))) for v in rep]
+        return {"x": x, "y": y, "radius": radius, "source": "target",
+                "color": {"srgb_hex": "#%02X%02X%02X" % (r, g, b),
+                          "srgb_255": [r, g, b]}}
+
     def _execute(self, action: dict) -> dict:
         """执行一个工具动作。
         - color(cN/#hex) 先解析为前景色自动 set_colors
-        - 工具走 bridge；绘画类执行后 wait_for_done 保投影一致
+        - paint_* 携带 size 时先落地为笔刷尺寸
+        - 坐标按 work→canvas 缩放；sample_color(target) 直接在目标图上采样
         :return: (执行结果 dict, 是否失败)
         """
         tool = action["tool"]
@@ -153,15 +213,25 @@ class AgentLoop:
             self.state.ledger.record(hexv)
             executed.append(("set_colors", hexv))
 
-        # 2) 主工具
+        # 2) 笔刷尺寸落地：paint_* 直接携带 size 时先设置笔刷
+        if tool in ("paint_path", "paint_line", "paint_shape") and "size" in params:
+            self.bridge.call("set_brush_params", {"size": float(params["size"])})
+            executed.append(("set_brush_size", params["size"]))
+
+        # 3) 主工具：target 采样走本地；绘画工具坐标还原到画布真实尺寸
         t0 = time.time()
-        result = self.bridge.call(tool, params)
+        if tool == "sample_color" and params.get("source", "target") == "target":
+            result = self._sample_target(
+                int(params.get("x", 0)), int(params.get("y", 0)),
+                int(params.get("radius", 0)), params.get("reduce", "median"))
+        else:
+            if tool in ("paint_line", "paint_path", "paint_shape"):
+                params = self._scale_paint_params(tool, params)
+            elif tool == "sample_color" and "x" in params and "y" in params:
+                params["x"], params["y"] = self._to_canvas_xy(params["x"], params["y"])
+            result = self.bridge.call(tool, params)
         ms = int((time.time() - t0) * 1000)
         executed.append((tool, params))
-
-        # 3) 绘画类后等待投影同步
-        if tool.startswith("paint") or tool in ("write_pixels", "undo", "redo"):
-            self.bridge.call("wait_for_done", {})
 
         ref = f"{color_token}/" if color_token else ""
         return {
@@ -195,11 +265,15 @@ class AgentLoop:
                 raise
         canvas_w, canvas_h = int(doc["width"]), int(doc["height"])
         work_w, work_h = self._work_size(canvas_w, canvas_h)
+        # 记录真实/工作尺寸，供后续坐标 work→canvas 换算与 target 采样使用
+        self.canvas_w, self.canvas_h = canvas_w, canvas_h
+        self.work_w, self.work_h = work_w, work_h
         print(f"[agent] 画布 {canvas_w}x{canvas_h} (工作尺寸 {work_w}x{work_h}) | "
               f"目标 {self.target_path} | 模型 {self.vlm.model}")
 
         # 1) 加载目标图并对齐
         target_arr = self._load_target(work_w, work_h)
+        self.target_arr = target_arr
         target_b64 = pil_to_b64(Image.fromarray(target_arr, "RGB"), "JPEG")
 
         # 2) L0：首轮 plan
@@ -207,8 +281,9 @@ class AgentLoop:
         plan_err = ""
         for attempt in range(self.plan_retries + 1):
             try:
-                raw = self._ask(build_plan_prompt(canvas_w, canvas_h),
-                                [{"image_b64": target_b64, "mime": "image/jpeg"}])
+                raw = self._ask(build_plan_prompt(work_w, work_h),
+                                [{"image_b64": target_b64, "mime": "image/jpeg"}],
+                                enable_thinking=self.enable_thinking)
                 act = parse_action(raw)
                 if act.get("action") != "plan":
                     raise ParseError(f"首轮应为 plan，得到 {act.get('action')}")
@@ -248,16 +323,32 @@ class AgentLoop:
                 continue
             metrics = CanvasMetrics(target_arr, canvas_arr)
             scalars = metrics.scalars()
+            painted = metrics.painted_pct()
             cov = metrics.covered_pct()
-            region_rows = metrics.by_regions((self.state.plan or {}).get("regions", []))
-            stall = self.state.update_stall(cov)
+            # A/B 结构阶段以“已绘占比”为主指标，C/D 颜色阶段以“匹配度”为主指标；
+            # 两者同时展示给模型，主指标用于停滞判决与区域状态
+            primary = "painted" if self.state.stage in ("A", "B") else "matched"
+            progress = painted if primary == "painted" else cov
+            region_rows = metrics.by_regions(
+                (self.state.plan or {}).get("regions", []), metric=primary)
+            stall = self.state.update_stall(progress, self.state.stage)
 
             stall_note = None
             if stall >= 3:
                 hot = next((r for r in region_rows if r["status"] == "hot"), None)
                 zone = f"r{hot['id']} 区域" if hot else "当前区域"
-                stall_note = (f"⚠ 连续 {stall} 轮在 {zone} 改动无明显改善。"
-                              f"建议：切换区域 / 检查颜色 / 或输出 done。")
+                stall_note = (f"⚠ 连续 {stall} 轮在 {zone} 无明显推进。"
+                              f"建议：切换区域 / 检查颜色 / 或完成本阶段后 next_stage。")
+
+            # 阶段动作数达标提示：模型容易在原地打磨，达标后主动提示可推进
+            stage_note = None
+            done_cnt = self.state.stage_actions.get(self.state.stage, 0)
+            need = MIN_ACTIONS.get(self.state.stage, 0)
+            si = STAGE_SEQ.index(self.state.stage)
+            if done_cnt >= need and si + 1 < len(STAGE_SEQ):
+                stage_note = (f"ℹ 本阶段绘画动作已达标（{done_cnt}/{need}）。"
+                              f"若该阶段结构基本到位，可输出 next_stage 进入 "
+                              f"{STAGE_SEQ[si + 1]} 阶段。")
 
             images = [{"image_b64": target_b64, "mime": "image/jpeg"},
                       {"image_b64": snap_data["image_b64"], "mime": "image/png"}]
@@ -269,19 +360,24 @@ class AgentLoop:
             text = build_user_text(
                 self.state, scalars, cov, region_rows,
                 feedback=feedback, stall_note=stall_note,
-                sample_result=sample_result,
+                sample_result=sample_result, painted=painted,
+                primary=primary, stage_note=stage_note,
             )
             feedback, sample_result = [], None
             try:
-                raw = self._ask(text, images)
+                raw = self._ask(text, images, enable_thinking=self.enable_thinking)
                 action = parse_action(raw)
             except ParseError as e:
                 feedback = [str(e), "请严格输出单一 JSON 对象"]
+                self._log(it, self.state.stage, "parse_error",
+                          {"err": str(e)[:120]}, "", False, 0)
                 print(f"[agent] iter {it}: 输出解析失败 - {e}")
                 continue
             except VLMError as e:
                 # _ask 内部已退避重试；到这表示连续多轮 API 不可用
                 vlm_fail_streak += 1
+                self._log(it, self.state.stage, "vlm_error",
+                          {"err": str(e)[:120]}, "", False, 0)
                 print(f"[agent] iter {it}: VLM 连续失败 {vlm_fail_streak} 次 - {e}")
                 if vlm_fail_streak >= 3:
                     stop_reason = "vlm_failed"
@@ -316,14 +412,20 @@ class AgentLoop:
                 break
 
             if kind == "plan":
-                # 允许纠正 plan（重解析 regions）
-                regions = action.get("regions", [])
-                if 3 <= len(regions) <= 8:
-                    self.state.plan = action
-                    print(f"[agent] iter {it}: plan 已更新")
+                # 只有首轮允许 plan，后续拒绝
+                if it <= 1:
+                    regions = action.get("regions", [])
+                    if 3 <= len(regions) <= 8:
+                        self.state.plan = action
+                        print(f"[agent] iter {it}: plan 已更新")
+                    else:
+                        feedback = ["plan regions 数量必须为 3~8"]
+                    continue
                 else:
-                    feedback = ["plan regions 数量必须为 3~8"]
-                continue
+                    feedback = ["⚠ 首轮已输出 plan，后续轮次禁止再次输出 plan！必须输出绘画工具动作。"]
+                    self._log(it, self.state.stage, "plan_reject", {}, "", False, 0)
+                    print(f"[agent] iter {it}: 拒绝 plan（已过了首轮）")
+                    continue
 
             if kind == "next_stage":
                 ok_, err_ = validate_next_stage(self.state,
@@ -331,11 +433,16 @@ class AgentLoop:
                                                 action.get("to", ""))
                 if not ok_:
                     feedback = [err_]
-                    self._log(it, self.state.stage, "next_stage", {}, "", False, 0)
+                    self._log(it, self.state.stage, "next_stage",
+                              {"from": action.get("from", ""), "to": action.get("to", ""),
+                               "err": err_}, "", False, 0)
                     print(f"[agent] iter {it}: 阶段切换被拒 - {err_}")
                     continue
                 self.state.stage = action["to"]
-                self.state.stage_cov_anchor[action["from"]] = cov
+                # 阶段切换后以“新阶段主指标”重置停滞基准，避免跨阶段连带误判
+                to_primary = ("painted" if action["to"] in ("A", "B")
+                              else "matched")
+                self.state.reset_stall(painted if to_primary == "painted" else cov)
                 self.state.plan["stage_goals_cur"] = action.get("stage_goals", [])
                 self.state.plan["open_issues"] = action.get("open_issues", [])
                 print(f"[agent] iter {it}: {action['from']}→{action['to']} "
@@ -351,7 +458,8 @@ class AgentLoop:
                                  self.state.ledger.resolve(color_token) if color_token else None)
             if not ok_:
                 feedback = [err_]
-                self._log(it, self.state.stage, tool, {}, action.get("thought", ""), False, 0)
+                self._log(it, self.state.stage, tool, {"err": err_},
+                          action.get("thought", ""), False, 0)
                 print(f"[agent] iter {it}: 硬约束拒绝 - {err_}")
                 continue
             if stage_decl != self.state.stage:
@@ -375,10 +483,11 @@ class AgentLoop:
                 except Exception:
                     pass
             print(f"[agent] iter {it}: {tool} ok ({res['elapsed_ms']}ms) "
-                  f"cov={cov:.3f} de={scalars['delta_e_mean']}")
+                  f"painted={painted:.3f} cov={cov:.3f} de={scalars['delta_e_mean']}")
 
             # ---- 终止判定（非 done 路径）----
-            stop_now, reason = self.state.conclude(False, scalars, self.max_iterations)
+            stop_now, reason = self.state.conclude(False, scalars,
+                                                   self.max_iterations, self.state.stage)
             if stop_now:
                 stop_reason = reason
                 break

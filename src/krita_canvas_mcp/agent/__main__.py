@@ -26,10 +26,14 @@ def main() -> None:
                         help="模型名(缺省从 .env / 环境变量读取)")
     parser.add_argument("--base-url", default=None,
                         help="OpenAI 兼容接口根地址(缺省从 .env / 环境变量读取)")
+    parser.add_argument("--retries", type=int, default=None,
+                        help="VLM 调用失败重试次数(默认无限；0 表示不重试)")
     parser.add_argument("--raw-output", action="store_true",
                         help="打印 AI 原始输出文本（便于调试）")
     parser.add_argument("--confirm", action="store_true",
                         help="每步执行前暂停等待用户确认（回车继续 / q 退出）")
+    parser.add_argument("--enable-thinking", action="store_true",
+                        help="启用思考模式（Agnes 模型专用，提升推理能力）")
     parser.add_argument("--out-dir", default="outputs", help="结果输出目录")
     parser.add_argument("--endpoint", default=None,
                         help="Krita 插件 RPC 地址(默认 http://127.0.0.1:5678/rpc)")
@@ -41,10 +45,12 @@ def main() -> None:
         model=args.model,
         base_url=args.base_url,
         max_iterations=args.max_iterations,
+        max_retries=args.retries,
         out_dir=args.out_dir,
         endpoint=args.endpoint or "http://127.0.0.1:5678/rpc",
         raw_output=args.raw_output,
         confirm=args.confirm,
+        enable_thinking=args.enable_thinking,
     )
     try:
         summary = loop.run()

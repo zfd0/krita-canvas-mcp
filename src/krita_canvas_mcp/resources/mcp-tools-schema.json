@@ -379,9 +379,9 @@
             }
           },
           "smooth": { "type": "boolean", "default": true, "description": "true时按贝塞尔平滑插值(建议 ≤32 点)，false时逐段直线" },
-          "closed": { "type": "boolean", "default": false },
+          "closed": { "type": "boolean", "default": false, "description": "闭合路径(仅描边)。注意：闭合不等于填充，填充必须显式设置 fill_style；草图/线稿阶段禁止填充" },
           "stroke_style": { "enum": ["ForegroundColor", "BackgroundColor", "None"], "default": "ForegroundColor" },
-          "fill_style": { "enum": ["None", "ForegroundColor", "BackgroundColor", "Pattern"], "default": "None" },
+          "fill_style": { "enum": ["None", "ForegroundColor", "BackgroundColor", "Pattern"], "default": "None", "description": "默认None(纯描边)。仅C填色/D光影阶段允许非None" },
           "auto_sync": { "type": "boolean", "default": true }
         },
         "required": ["points"]
@@ -469,51 +469,51 @@
     },
     {
       "name": "list_resources",
-      "description": "枚举可用资源：brush(笔刷)/preset(笔刷预设)/pattern/gradient/palette/workspace",
+      "description": "枚举可用资源：brush(笔刷)/preset(笔刷预设)/pattern(图案)/gradient(渐变)/palette(调色板)/workspace(工作区)",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "resource_type": { "enum": ["brush", "preset", "pattern", "gradient", "palette", "workspace"] },
-          "filter": { "type": "string", "description": "名称子串过滤" }
+          "resource_type": { "enum": ["brush", "preset", "pattern", "gradient", "palette", "workspace"], "description": "资源类型，常用: preset(笔刷预设)" },
+          "filter": { "type": "string", "description": "名称子串过滤，如 'Blur' 过滤模糊笔刷" }
         },
         "required": ["resource_type"]
       }
     },
     {
       "name": "set_brush_preset",
-      "description": "激活指定笔刷预设；后续paint_*均使用该预设",
+      "description": "激活指定笔刷预设；后续 paint_* 均使用该预设。常用预设: Basic/Brush/Blur/Soft(软圆), Basic/Brush/Glacage(薄涂), Basic/Brush/Paint/Flat(平头)",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "preset_name": { "type": "string", "description": "来自list_resources(preset)" },
-          "resource_type": { "enum": ["preset", "brush"], "default": "preset" }
+          "preset_name": { "type": "string", "description": "笔刷预设名称，来自 list_resources(preset)" },
+          "resource_type": { "enum": ["preset", "brush"], "default": "preset", "description": "资源类型" }
         },
         "required": ["preset_name"]
       }
     },
     {
       "name": "set_brush_params",
-      "description": "一次设置多个绘画参数(大小/不透明度/流量/旋转/图案尺寸)",
+      "description": "设置当前笔刷参数。常用: size(笔刷大小 px, A阶段 6-12, B阶段 1-3, C/D阶段 4-20), opacity(不透明度 0-1)",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "size": { "type": "number", "exclusiveMinimum": 0, "description": "像素" },
-          "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
-          "flow": { "type": "number", "minimum": 0, "maximum": 1 },
-          "rotation": { "type": "number", "minimum": -360, "maximum": 360, "description": "度" },
-          "pattern_size": { "type": "number", "exclusiveMinimum": 0 }
+          "size": { "type": "number", "exclusiveMinimum": 0, "description": "笔刷大小，单位像素。A草图 6-12, B线稿 1-3, C填色 4-20, D光影 2-10" },
+          "opacity": { "type": "number", "minimum": 0, "maximum": 1, "description": "不透明度 0-1。C/D阶段建议 0.9-1.0" },
+          "flow": { "type": "number", "minimum": 0, "maximum": 1, "description": "流量 0-1" },
+          "rotation": { "type": "number", "minimum": -360, "maximum": 360, "description": "旋转角度(度)" },
+          "pattern_size": { "type": "number", "exclusiveMinimum": 0, "description": "图案笔刷尺寸" }
         },
         "required": []
       }
     },
     {
       "name": "set_colors",
-      "description": "设置前景/背景色(0.0~1.0浮点或0~255整数)",
+      "description": "设置前景色(画笔颜色)和背景色。前景色用于 paint_path/paint_line 等绘制操作",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "foreground": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" }, "description": "[r,g,b] 或 [r,g,b,a]" },
-          "background": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" } }
+          "foreground": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" }, "description": "前景色 [r,g,b] 或 [r,g,b,a]，范围 0-255 或 0.0-1.0。例: [128,128,128] 灰色, [30,95,175] 蓝色" },
+          "background": { "type": "array", "minItems": 3, "maxItems": 4, "items": { "type": "number" }, "description": "背景色 [r,g,b]" }
         },
         "required": []
       }

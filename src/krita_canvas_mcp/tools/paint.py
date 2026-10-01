@@ -15,6 +15,7 @@ def register(mcp: MCPServer) -> None:
     def paint_line(
         x1: int, y1: int, x2: int, y2: int,
         node_id: str | None = None,
+        size: float | None = None,
         pressure1: float = 1.0, pressure2: float = 1.0,
         stroke_style: str = "ForegroundColor",
         auto_sync: bool = True,
@@ -24,6 +25,8 @@ def register(mcp: MCPServer) -> None:
             "pressure1": pressure1, "pressure2": pressure2,
             "stroke_style": stroke_style,
         }
+        if size is not None:
+            params["size"] = size
         if not auto_sync:
             params["auto_sync"] = False
         return _call("paint_line", params)
@@ -31,11 +34,13 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="paint_path",
         description="用当前笔刷沿折线/贝塞尔路径绘制自由笔画。points 为 [[x,y(,压感)],...]，"
-                    "smooth=True 贝塞尔平滑，closed=True 闭合填充。闭环绘画主执行通道。绘制后自动同步投影",
+                    "smooth=True 贝塞尔平滑，closed=True 仅闭合路径（不填充；填充需显式设置 fill_style）。"
+                    "草图/线稿阶段禁止填充。闭环绘画主执行通道。绘制后自动同步投影",
     )
     def paint_path(
         points: list,
         node_id: str | None = None,
+        size: float | None = None,
         smooth: bool = True, closed: bool = False,
         stroke_style: str = "ForegroundColor", fill_style: str = "None",
         auto_sync: bool = True,
@@ -45,6 +50,8 @@ def register(mcp: MCPServer) -> None:
             "closed": closed, "stroke_style": stroke_style,
             "fill_style": fill_style,
         }
+        if size is not None:
+            params["size"] = size
         if not auto_sync:
             params["auto_sync"] = False
         return _call("paint_path", params)

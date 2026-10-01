@@ -54,6 +54,61 @@ def _extract_json(text: str):
     raise ParseError(f"JSON 解析失败: {text[:200]}")
 
 
+def _norm_bbox(v) -> list:
+    """规范化 bbox 为 [x, y, w, h] 四整数。
+
+    容错模型偶发的双层嵌套（如 [[x,y,w,h]]），并统一转为整数。
+    格式非法时抛 ParseError，交给 loop 按“输出解析失败”降级重试。
+    """
+    if isinstance(v, (list, tuple)):
+        # 兼容双层嵌套：[[425,30,575,230]] → [425,30,575,230]
+        if len(v) == 1 and isinstance(v[0], (list, tuple)) and len(v[0]) == 4:
+            v = v[0]
+        if len(v) == 4:
+            try:
+                return [int(round(float(x))) for x in v]
+            except (TypeError, ValueError):
+                raise ParseError(f"region bbox 数值非法: {v!r}")
+    raise ParseError(f"region bbox 应为 [x,y,w,h]，实际为 {v!r}")
+
+
+def _norm_points(pts) -> list:
+    """规范化 points 为 [[x,y],...] 列表。
+
+    容错模型可能返回 {"x": ..., "y": ...} 字典格式。
+    """
+    if not isinstance(pts, list):
+        raise ParseError(f"points 应为数组，实际为 {pts!r}")
+    result = []
+    for p in pts:
+        if isinstance(p, (list, tuple)):
+            if len(p) >= 2:
+                result.append([float(p[0]), float(p[1])])
+            else:
+                raise ParseError(f"point 至少需要 2 个坐标，实际为 {p!r}")
+        elif isinstance(p, dict):
+            # 兼容 {"x": 100, "y": 200} 格式
+            if "x" in p and "y" in p:
+                result.append([float(p["x"]), float(p["y"])])
+            else:
+                raise ParseError(f"point 字典缺少 x/y 字段: {p!r}")
+        else:
+            raise ParseError(f"point 格式非法: {p!r}")
+    return result
+
+
+def _norm_str_param(params: dict, key: str, default: str = "") -> str:
+    """规范化字符串参数，如果是 dict 则取第一个值或返回 default。"""
+    val = params.get(key, default)
+    if isinstance(val, dict):
+        # 模型可能错误地传了字典，尝试取 size 或其他值
+        first_key = next(iter(val.keys()), None)
+        if first_key:
+            return str(val[first_key])
+        return default
+    return str(val) if val is not None else default
+
+
 def parse_action(text: str) -> dict:
     """LLM 输出文本 → 动作 dict。
     - 特殊动作: {action: plan|next_stage|done}
@@ -64,11 +119,29 @@ def parse_action(text: str) -> dict:
         raise ParseError("输出必须是 JSON 对象")
     obj.setdefault("thought", "")
     if "action" in obj:
+        # plan 动作：规范化 regions 的 bbox，避免下游按 [x,y,w,h] 解包崩溃
+        if obj.get("action") == "plan" and isinstance(obj.get("regions"), list):
+            for r in obj["regions"]:
+                if isinstance(r, dict) and "bbox" in r:
+                    r["bbox"] = _norm_bbox(r["bbox"])
         return obj
     if "tool" in obj and "params" in obj:
         obj.setdefault("stage", "A")
         if not isinstance(obj["params"], dict):
             raise ParseError("params 必须是对象")
+        # 规范化 points 格式（兼容 {"x", "y"} 字典）
+        if "points" in obj["params"]:
+            try:
+                obj["params"]["points"] = _norm_points(obj["params"]["points"])
+            except ParseError as e:
+                raise ParseError(f"points 解析失败: {e}")
+        # 规范化 stroke_style 和 fill_style（必须是字符串）
+        for key in ("stroke_style", "fill_style"):
+            if key in obj["params"]:
+                obj["params"][key] = _norm_str_param(obj["params"], key, "ForegroundColor" if key == "stroke_style" else "None")
+        # 移除无效的 node_id（null 或不存在的节点）
+        if obj["params"].get("node_id") is None or obj["params"].get("node_id") == "":
+            obj["params"].pop("node_id", None)
         return obj
     raise ParseError(f"缺少 action 或 tool 字段: {json.dumps(obj, ensure_ascii=False)[:200]}")
 
@@ -87,13 +160,18 @@ def build_plan_prompt(canvas_w: int, canvas_h: int) -> str:
 
 def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
                     feedback: list | None = None, stall_note: str | None = None,
-                    sample_result: dict | None = None) -> str:
+                    sample_result: dict | None = None,
+                    painted: float = 0.0, primary: str = "matched",
+                    stage_note: str | None = None) -> str:
     """每轮文本上下文装配（草稿第四节模板）。
     :param state:     SessionState
     :param metrics:   CanvasMetrics.scalars() + covered
-    :param cov:       全图 covered_pct
+    :param cov:       全图匹配度（ΔE<6 占比）
+    :param painted:   全图已绘占比（白底画布上已落笔的像素比例）
+    :param primary:   阶段主指标 "painted"(A/B) | "matched"(C/D)
     :param regions_rows: by_regions 行
-    :param feedback: 上一轮被拒原因/提示，注入本轮
+    :param feedback:  上一轮被拒原因/提示，注入本轮
+    :param stage_note: 阶段动作数达标提示
     """
     lines = []
     lines.append("--- 会话状态 ---")
@@ -120,15 +198,22 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
 
     lines.append("")
     lines.append("--- 进度摘要 ---")
-    lines.append(f"covered_pct: {cov:.3f}   "
-                 f"delta_e_mean: {metrics.get('delta_e_mean', '?')}   "
+    pri_label = ("已绘(主指标·A/B看结构推进)" if primary == "painted"
+                 else "匹配(主指标·C/D看颜色贴合)")
+    lines.append(f"painted 已绘: {painted:.3f}   covered 匹配(ΔE<6): {cov:.3f}   "
+                 f"主指标: {pri_label}")
+    lines.append(f"delta_e_mean: {metrics.get('delta_e_mean', '?')}   "
                  f"ssim: {metrics.get('ssim', '?')}")
     for r in regions_rows:
         lines.append(f"  {r['id']:>3} {r['name'][:6]:<6} "
-                     f"{r['covered_pct']:.2f} {r['status']}")
+                     f"已绘{r['painted_pct']:.2f} 匹配{r['covered_pct']:.2f} "
+                     f"{r['status']}")
     if sample_result:
-        lines.append(f"上一轮采样结果: {json.dumps(sample_result, ensure_ascii=False)[:200]}")
+        lines.append(f"上一轮采样结果: {sample_result[:200]}")
 
+    if stage_note:
+        lines.append("")
+        lines.append(stage_note)
     if stall_note:
         lines.append("")
         lines.append(stall_note)
