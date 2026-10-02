@@ -1,0 +1,22 @@
+{
+  "session_id": "20261001_231816",
+  "stop_reason": "stalled",
+  "iterations": 72,
+  "metrics": {
+    "mae": 22.2809,
+    "rmse": 53.5088,
+    "psnr": 13.56,
+    "ssim": 0.7699,
+    "delta_e_mean": 10.12,
+    "delta_e_p95": 63.58
+  },
+  "stage_breakdown": {
+    "A": 9,
+    "B": 13,
+    "C": 8,
+    "D": 0
+  },
+  "history_count": 71,
+  "final_image_path": "outputs\\final_20261001_231816.png",
+  "target_path": "tests\\fixtures\\test_image.png"
+}

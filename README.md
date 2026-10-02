@@ -318,6 +318,8 @@ krita-canvas-mcp/
 
 ## 注意事项
 
+- **项目进度**：当前项目未完成，效果如图所示：
+![](outputs\final_20261001_231816.png)
 - **Krita 版本**：插件基于 Krita Python API（`from krita import Extension`）与 LibKis 交互，已在 Krita 6.0.4 验证
 - **LibKis 主线程限制**：所有 LibKis 调用必须在线程安全队列中由 Krita 主线程执行；MCP 工具只发 HTTP 请求
 - **画布快照分辨率**：闭环 Agent 以 `max_side=768` 工作，大画布等比缩放；实际坐标还原到画布真实尺寸后执行
