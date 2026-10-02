@@ -229,21 +229,22 @@ python -m krita_canvas_mcp --transport streamable-http --port 8765
 
 ### 停滞检测
 
-- A/B：每轮已绘占比增幅 < 0.02% 计一次停滞，连续 **12 轮**触发警告
-- C/D：每轮匹配度增幅 < 0.2% 计一次停滞，连续 **5 轮**触发警告
-- 停滞时注入提示，15 轮强制终止
+- A/B：每轮已绘占比增幅 < 0.02% 计一次停滞，连续 **12 轮**强制终止
+- C/D：每轮匹配度增幅 < 0.2% 计一次停滞，连续 **5 轮**强制终止
+- 连续 ≥3 轮停滞时向模型注入提示，引导切换区域或推进阶段
+- VLM 连续失败 3 次也触发终止（`vlm_failed`）
 
 ### 颜色账本（ColorLedger）
 
 每次调用 `set_colors` 登记颜色，按使用频率降序编号为 `c1 / c2 / …`。LLM 可在后续动作中通过 `color: "c3"` 引用，避免重复输入 `#RRGGBB`。C/D 阶段禁止引用 `c1/c2`（通常残留 A/B 草稿灰）。
 
-### VLM 客户端
+### VLM 客户端与重试
 
 兼容任意 OpenAI Chat Completions 接口：
 
 - 默认调用 `VLM_BASE_URL + /chat/completions`
 - 支持 `enable_thinking` 参数（模型名含 `agnes` 时自动注入 `chat_template_kwargs.enable_thinking=true`）
-- API 错误指数退避重试（3s、6s、12s…上限 60s），耗尽后抛 `VLMError`
+- 调用失败时按指数退避重试（3s → 6s → 12s → … → 上限 60s）；重试耗尽抛 `VLMError`，连续 3 次失败 Agent 强制终止
 
 ## 开发自测
 
@@ -317,7 +318,7 @@ krita-canvas-mcp/
 
 ## 注意事项
 
-- **Krita 版本**：插件通过 Qt 5 / LibKis 6.x API 与 Krita 6.0.4 兼容
+- **Krita 版本**：插件基于 Krita Python API（`from krita import Extension`）与 LibKis 交互，已在 Krita 6.0.4 验证
 - **LibKis 主线程限制**：所有 LibKis 调用必须在线程安全队列中由 Krita 主线程执行；MCP 工具只发 HTTP 请求
 - **画布快照分辨率**：闭环 Agent 以 `max_side=768` 工作，大画布等比缩放；实际坐标还原到画布真实尺寸后执行
 - **颜色管理**：AI 绘制的颜色不可逆——`undo` 仅回退动作，不恢复被覆盖的历史颜色；建议在关键阶段前 `save_document`
