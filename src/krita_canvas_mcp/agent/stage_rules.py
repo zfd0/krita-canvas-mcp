@@ -2,14 +2,16 @@
 
 服务端按 stage 校验本轮动作，不符则拒绝并返回原因让模型重试。
 硬约束只锁最常见的翻车：A 上色、B 用粗笔、C 透明叠色、D 造新色。
+阶段序列：O 计划 → A 草图 → B 线稿 → C 填色 → D 光影；
+plan 动作仅允许在 O 计划阶段输出。
 """
 from __future__ import annotations
 
-STAGE_SEQ = ["A", "B", "C", "D"]
-STAGE_NAMES = {"A": "草图", "B": "线稿", "C": "填色", "D": "光影"}
+STAGE_SEQ = ["O", "A", "B", "C", "D"]
+STAGE_NAMES = {"O": "计划", "A": "草图", "B": "线稿", "C": "填色", "D": "光影"}
 
-# 每阶段动作数下限（低于则拒绝 next_stage）
-MIN_ACTIONS = {"A": 8, "B": 8, "C": 6, "D": 6}
+# 每阶段动作数下限（低于则拒绝 next_stage）；O 为计划阶段，无绘画动作门槛
+MIN_ACTIONS = {"O": 0, "A": 8, "B": 8, "C": 6, "D": 6}
 
 # 硬约束表：允许工具 + 校验函数列表
 # 校验函数签名: (tool: str, params: dict) -> (ok: bool, err: str|None)
@@ -94,8 +96,13 @@ def validate(stage: str, tool: str, params: dict,
     :param color_token: 动作里的原始颜色引用（c1/c2/#hex），用于识别遗留色槽
     :return: (ok: bool, err: str|None)
     """
+    # O 计划阶段不执行任何工具：plan 就绪后输出 next_stage 进入 A
+    if stage == "O":
+        return False, ("STAGE_O_PLAN_ONLY: O 计划阶段只能输出 plan 动作"
+                       "（plan 就绪后输出 next_stage 进入 A 阶段），"
+                       "不能调用绘画/管理工具")
     if stage not in RULES:
-        return False, f"STAGE_UNKNOWN: 非法阶段 {stage}（应为 A/B/C/D）"
+        return False, f"STAGE_UNKNOWN: 非法阶段 {stage}（应为 O/A/B/C/D）"
     allowed, check = RULES[stage]
     if tool not in allowed:
         return False, (f"STAGE_{stage}_TOOL_FORBIDDEN: "
@@ -122,9 +129,13 @@ def validate_next_stage(state, from_stage: str, to_stage: str) -> tuple:
     try:
         fi, ti = STAGE_SEQ.index(from_stage), STAGE_SEQ.index(to_stage)
     except ValueError:
-        return False, f"STAGE_UNKNOWN: 阶段应为 A/B/C/D，得到 {from_stage}/{to_stage}"
+        return False, f"STAGE_UNKNOWN: 阶段应为 O/A/B/C/D，得到 {from_stage}/{to_stage}"
     if ti != fi + 1:
         return False, f"STAGE_SKIP: 不允许从 {from_stage} 跳到 {to_stage}，必须顺序推进"
+    # O→A 前置条件：plan 必须已就绪（O 阶段的核心产出）
+    if from_stage == "O" and not state.plan:
+        return False, ("STAGE_O_NO_PLAN: O 计划阶段尚未输出 plan，"
+                       "请先完成 plan 再进入 A 阶段")
     need = MIN_ACTIONS.get(from_stage, 0)
     done = state.stage_actions.get(from_stage, 0)
     if done < need:

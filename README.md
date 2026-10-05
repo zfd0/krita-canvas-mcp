@@ -16,7 +16,7 @@
 ```
 
 - **`plugin/`**：Krita 内插件（LibKis 必须在主线程执行；HTTP 请求经队列由 QTimer 消费）
-- **`src/krita_canvas_mcp/`**：MCP 服务器（无状态工具转发）+ `agent/` 闭环绘画代理（有状态：阶段/计划/颜色账本/动作历史/停滞检测）
+- **`src/krita_canvas_mcp/`**：MCP 服务器（无状态工具转发）+ `agent/` 闭环绘画代理（有状态：阶段/计划/颜色账本/动作历史）
 - **`scripts/`**：插件安装、全量工具测试脚本
 - **`tests/fixtures/`**：测试用目标图
 
@@ -55,14 +55,14 @@ VLM_MODEL=glm-4.6v-flash
 ### 4. 跑闭环 Agent
 
 ```bash
-python -m krita_canvas_mcp.agent --target <目标图路径> [--max-iterations 200]
+python -m krita_canvas_mcp.agent --target <目标图路径> [--max-iterations 1000]
 ```
 
 可选参数：
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
-| `--max-iterations` | 最大迭代次数 | 200 |
+| `--max-iterations` | 最大迭代次数 | 1000 |
 | `--api-key` | VLM API Key（优先于 .env） | 从 .env 读取 |
 | `--model` | 模型名（优先于 .env） | 从 .env 读取 |
 | `--base-url` | OpenAI 兼容接口根地址（优先于 .env） | 从 .env 读取 |
@@ -90,7 +90,7 @@ python -m krita_canvas_mcp --transport streamable-http --port 8765
 
 ## 闭环契约
 
-- **四阶段** `A 草图 → B 线稿 → C 填色 → D 光影`，显式 `next_stage` 切换（服务端校验：顺序推进 + 本阶段最少成功动作数，不满足拒绝并回显原因让模型重试）
+- **五阶段** `O 计划 → A 草图 → B 线稿 → C 填色 → D 光影`，显式 `next_stage` 切换（服务端校验：顺序推进 + 本阶段最少成功动作数，不满足拒绝并回显原因让模型重试）；`plan` 仅允许在 O 计划阶段输出，O→A 需 plan 已就绪
 - **每轮一个动作**：`{"thought":"≤60字三段式","stage":"C","tool":"paint_path","params":{...},"color":"c3"}`
 - **硬约束** 按阶段锁翻车：
   - A：禁止填充；笔刷 4~12px；仅允许灰/蓝色
@@ -98,7 +98,7 @@ python -m krita_canvas_mcp --transport streamable-http --port 8765
   - C：禁止半透明叠色（opacity < 0.9）
   - D：建议实色（opacity ≥ 0.9）
 - **上下文装配** 每轮全量给：目标图 + 画布快照 + 热力图（C/D 阶段）+ 会话状态 + 颜色账本（c1..cN）+ 近 5 步动作 + 区域进度
-- **三重终止** LLM 自报 `done` / 达到迭代上限 / 像素收敛（ΔE<4 且 SSIM>0.92），附加停滞检测：连续 3 轮无改善注入提示、5 轮强制终止
+- **终止条件** LLM 自报 `done` / 达到迭代上限（默认 1000 轮）
 - LLM 的 `color` 字段支持 `cN`（账本编号，按使用频率降序）或 `#RRGGBB`，执行前自动转为 `set_colors(foreground)`
 
 ## 工具清单（59 个）
@@ -227,12 +227,14 @@ python -m krita_canvas_mcp --transport streamable-http --port 8765
 - A/B 阶段以 `painted_pct` 为主指标（结构推进）；C/D 阶段以 `covered_pct` 为主指标（颜色贴合）
 - 白背景与白画布天然 ΔE≈0，计入匹配度会虚高——因此所有统计仅覆盖目标前景像素
 
-### 停滞检测
+### 终止条件
 
-- A/B：每轮已绘占比增幅 < 0.02% 计一次停滞，连续 **12 轮**强制终止
-- C/D：每轮匹配度增幅 < 0.2% 计一次停滞，连续 **5 轮**强制终止
-- 连续 ≥3 轮停滞时向模型注入提示，引导切换区域或推进阶段
-- VLM 连续失败 3 次也触发终止（`vlm_failed`）
+- LLM 自报 `done`（`llm_done`）
+- 达到迭代上限（`max_iter`，默认 1000）
+- VLM（模型 API）连续失败 3 次（`vlm_failed`，每轮内部先指数退避重试）
+- `--confirm` 模式下用户输入 `q`（`user_quit`）
+
+注：工具执行失败（KritaError）不中断，仅回显错误让模型重试。
 
 ### 颜色账本（ColorLedger）
 
@@ -322,6 +324,6 @@ krita-canvas-mcp/
 ![](outputs/final_20261001_231816.png)
 - **Krita 版本**：插件基于 Krita Python API（`from krita import Extension`）与 LibKis 交互，已在 Krita 6.0.4 验证
 - **LibKis 主线程限制**：所有 LibKis 调用必须在线程安全队列中由 Krita 主线程执行；MCP 工具只发 HTTP 请求
-- **画布快照分辨率**：闭环 Agent 以 `max_side=768` 工作，大画布等比缩放；实际坐标还原到画布真实尺寸后执行
+- **画布不做缩放**：闭环 Agent 直接以画布真实像素尺寸工作（target/快照/热力图与画布严格同尺寸），模型输出的坐标即真实坐标，无需换算
 - **颜色管理**：AI 绘制的颜色不可逆——`undo` 仅回退动作，不恢复被覆盖的历史颜色；建议在关键阶段前 `save_document`
 - **Windows 兼容性**：`.desktop` 软链在 Windows 需管理员权限或开发者模式；`install_plugin.py --link` 失败时自动回退复制模式

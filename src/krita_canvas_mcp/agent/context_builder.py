@@ -126,7 +126,6 @@ def parse_action(text: str) -> dict:
                     r["bbox"] = _norm_bbox(r["bbox"])
         return obj
     if "tool" in obj and "params" in obj:
-        obj.setdefault("stage", "A")
         if not isinstance(obj["params"], dict):
             raise ParseError("params 必须是对象")
         # 规范化 points 格式（兼容 {"x", "y"} 字典）
@@ -147,19 +146,20 @@ def parse_action(text: str) -> dict:
 
 
 def build_plan_prompt(canvas_w: int, canvas_h: int) -> str:
-    """首轮 plan 请求文本。"""
+    """O 计划阶段的 plan 请求文本（画布真实像素尺寸，不缩放）。"""
     return (
-        f"画布尺寸 {canvas_w}×{canvas_h}。请观察目标图像，输出首轮 plan JSON：\n"
+        f"当前为 O 计划阶段。画布尺寸 {canvas_w}×{canvas_h}（像素坐标与此一致）。"
+        f"请观察目标图像，输出 plan JSON：\n"
         "{\"action\":\"plan\",\"composition\":\"一句话构图描述\","
         "\"regions\":[{\"id\":\"r1\",\"name\":\"区域名\",\"bbox\":[x,y,w,h]}...3~8个],"
         "\"palette_hint\":[\"色相倾向描述...\"],"
-        "\"stage_plan\":\"A→B→C→D 简述\",\"risks\":\"难点提醒\"}\n"
-        "只输出该 JSON，不要其他文字。"
+        "\"stage_plan\":\"O→A→B→C→D 简述\",\"risks\":\"难点提醒\"}\n"
+        "plan 就绪后，下一轮输出 next_stage 进入 A 阶段。只输出该 JSON，不要其他文字。"
     )
 
 
 def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
-                    feedback: list | None = None, stall_note: str | None = None,
+                    feedback: list | None = None,
                     sample_result: dict | None = None,
                     painted: float = 0.0, primary: str = "matched",
                     stage_note: str | None = None) -> str:
@@ -171,12 +171,11 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
     :param primary:   阶段主指标 "painted"(A/B) | "matched"(C/D)
     :param regions_rows: by_regions 行
     :param feedback:  上一轮被拒原因/提示，注入本轮
-    :param stage_note: 阶段动作数达标提示
+    :param stage_note: 阶段提示（O 阶段切换 / 动作数达标）
     """
     lines = []
     lines.append("--- 会话状态 ---")
-    lines.append(f"stage: {state.stage}    iteration: {state.iteration}    "
-                 f"stall_rounds: {state.stall_rounds}")
+    lines.append(f"stage: {state.stage}    iteration: {state.iteration}")
     p = state.plan or {}
     if p:
         lines.append(f"plan 构图: {p.get('composition', '')}")
@@ -214,9 +213,6 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
     if stage_note:
         lines.append("")
         lines.append(stage_note)
-    if stall_note:
-        lines.append("")
-        lines.append(stall_note)
     if feedback:
         lines.append("")
         lines.append("⚠ 上轮输出的修正要求：")

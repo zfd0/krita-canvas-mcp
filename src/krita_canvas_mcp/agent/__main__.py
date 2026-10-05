@@ -18,7 +18,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="krita-canvas-agent",
                                      description="Krita 闭环绘画代理")
     parser.add_argument("--target", required=True, help="目标图像路径")
-    parser.add_argument("--max-iterations", type=int, default=200,
+    parser.add_argument("--max-iterations", type=int, default=1000,
                         help="迭代上限")
     parser.add_argument("--api-key", default=None,
                         help="VLM API Key(缺省从 .env / 环境变量读取)")

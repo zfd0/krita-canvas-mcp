@@ -3,7 +3,9 @@
 - CanvasMetrics: 画布 vs 目标图的标量差异(mae/rmse/psnr/ssim/delta_e/covered_pct)、
   热点、区域统计、伪彩色热力图。
 - ColorLedger:   颜色账本(防调色漂移)。
-- SessionState:  stage/iteration/plan/动作历史/停滞检测/终止判定。
+- SessionState:  stage/iteration/plan/动作历史。
+
+阶段序列为 O(计划)→A(草图)→B(线稿)→C(填色)→D(光影)。
 """
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from PIL import Image
+
+from .stage_rules import STAGE_SEQ
 
 # ---------------------------------------------------------------- 差异度量
 
@@ -226,12 +230,12 @@ class CanvasMetrics:
         return rows
 
     # ---- 热力图 ----
-    def heatmap_b64(self, max_side: int = 512) -> tuple:
-        """伪彩色热力图 → (b64, 缩放后的宽, 高)。"""
+    def heatmap_b64(self, max_side: int | None = None) -> tuple:
+        """伪彩色热力图 → (b64, 宽, 高)。max_side=None 时不缩放（与画布同尺寸）。"""
         hm = _heatmap_lut(self.delta_e)
         img = Image.fromarray(hm, "RGB")
         w, h = img.size
-        if max(w, h) > max_side:
+        if max_side is not None and max(w, h) > max_side:
             scale = max_side / max(w, h)
             img = img.resize((int(w * scale), int(h * scale)))
         from .vlm_client import pil_to_b64
@@ -291,28 +295,14 @@ class ActionRecord:
     color: str = ""
 
 
-STAGE_SEQ = ["A", "B", "C", "D"]
-# 各阶段最少动作数（next_stage 校验用，低于该值拒绝切换）
-MIN_ACTIONS = {"A": 8, "B": 8, "C": 6, "D": 6}
-
-# 阶段停滞增益阈值：入参 progress 为阶段主指标（A/B=已绘占比，C/D=匹配度）。
-# A/B 单笔线条对已绘占比的增量约为 0.1%~1%，阈值取小即可灵敏判定停滞；
-# C/D 匹配度增长更集中，阈值取大一些。
-STAGE_STALL_GAIN = {"A": 0.0002, "B": 0.0002, "C": 0.002, "D": 0.002}
-# 阶段停滞触发轮数：A/B 结构阶段放宽，C/D 填色光影阶段收紧
-STAGE_STALL_LIMIT = {"A": 12, "B": 12, "C": 5, "D": 5}
-
-
 @dataclass
 class SessionState:
     """会话状态。"""
-    stage: str = "A"
+    stage: str = "O"  # 初始为 O 计划阶段
     iteration: int = 0
     plan: dict | None = None
     history: list = field(default_factory=list)       # ActionRecord
     ledger: ColorLedger = field(default_factory=ColorLedger)
-    stall_rounds: int = 0
-    last_covered: float = 0.0
     stage_actions: dict = field(default_factory=lambda: {s: 0 for s in STAGE_SEQ})
     started_at: float = field(default_factory=time.time)
     out_dir: str = "outputs"
@@ -336,40 +326,6 @@ class SessionState:
     def _history_path(self) -> str:
         import os
         return os.path.join(self.out_dir, "action_history.jsonl")
-
-    # ---- 停滞检测 ----
-    def update_stall(self, progress: float, stage: str = "C") -> int:
-        """更新停滞计数：progress（阶段主指标）改善低于阶段阈值累加，否则清零。
-
-        A/B 传已绘占比（painted_pct），C/D 传匹配度（covered_pct），
-        调用方负责按 stage 选取对应指标；切阶段时应调用 reset_stall 重置基准。
-        """
-        gain_threshold = STAGE_STALL_GAIN.get(stage, 0.002)
-        if progress - self.last_covered < gain_threshold:
-            self.stall_rounds += 1
-        else:
-            self.stall_rounds = 0
-        self.last_covered = progress
-        return self.stall_rounds
-
-    def reset_stall(self, progress: float) -> None:
-        """阶段切换后重置停滞基准（progress 用新阶段的主指标），避免跨阶段连带误判。"""
-        self.stall_rounds = 0
-        self.last_covered = progress
-
-    # ---- 终止判定 ----
-    def conclude(self, done: bool, metrics: dict, max_iter: int,
-                 stage: str = "C") -> tuple:
-        """返回 (stop: bool, reason: str|None)。停滞阈值按阶段区分。"""
-        if done:
-            return True, "llm_done"
-        if self.iteration >= max_iter:
-            return True, "max_iter"
-        if metrics["delta_e_mean"] < 4.0 and metrics["ssim"] > 0.92:
-            return True, "converged"
-        if self.stall_rounds >= STAGE_STALL_LIMIT.get(stage, 5):
-            return True, "stalled"
-        return False, None
 
     # ---- 摘要 ----
     def recent_summary(self, n: int = 5) -> list[str]:
