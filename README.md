@@ -67,16 +67,18 @@ python -m krita_canvas_mcp.agent --target <目标图路径> [--max-iterations 10
 | `--model` | 模型名（优先于 .env） | 从 .env 读取 |
 | `--base-url` | OpenAI 兼容接口根地址（优先于 .env） | 从 .env 读取 |
 | `--retries` | VLM 失败重试次数；`0`=不重试；`None`=无限 | 无限 |
-| `--raw-output` | 打印 AI 原始输出文本（调试用） | — |
+| `--raw-output` | 打印完整模型 API 返回（JSON，调试用） | — |
+| `--raw-input` | 保存并打印发往模型的完整请求 JSON（图片落盘、JSON 内替换为相对路径，调试用） | — |
 | `--confirm` | 每步执行前暂停等待用户确认（回车继续 / q 退出） | — |
 | `--enable-thinking` | 启用思考模式（Agnes 模型专用，提升推理能力） | — |
 | `--out-dir` | 结果输出目录 | `outputs/` |
 | `--endpoint` | Krita 插件 RPC 地址 | `http://127.0.0.1:5678/rpc` |
 
-结果落盘 `outputs/`：
-- `final_*.png` — 最终画布截图
-- `summary_*.json` — 会话指标、阶段分布、终止原因
+结果落盘到以时间戳命名的独立目录 `outputs/<时间戳>/`（每次运行一份，互不覆盖）：
+- `final.png` — 最终画布截图
+- `summary.json` — 会话指标、阶段分布、终止原因、缓存命中
 - `action_history.jsonl` — 逐轮动作记录
+- `request_*.json` / `img_<hash>.png|jpg` — 仅在 `--raw-input` 时生成：发往模型的完整请求 JSON（图片字段为相对路径）及抽出的图片；图片按内容哈希去重，逐轮相同的目标图只保存一份
 
 ### 5. 仅用 MCP 工具（不跑闭环 Agent）
 
@@ -98,7 +100,7 @@ python -m krita_canvas_mcp --transport streamable-http --port 8765
   - C：禁止半透明叠色（opacity < 0.9）
   - D：建议实色（opacity ≥ 0.9）
 - **上下文装配** 按字节稳定性分段以命中 LLM 前缀缓存：**稳定文本前缀**（stage/plan，置于图像之前）→ 目标图 + 画布快照 + 热力图（C/D 阶段）→ **变化文本后缀**（iter 计数 + 颜色账本（c1..cN）+ 近 5 步动作 + 区域进度 + 采样/反馈）
-- **缓存遥测** 每轮读取响应 `usage` 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`，逐轮打印并汇总进 `outputs/summary_<session>.json` 的 `prompt_cache` 字段
+- **缓存遥测** 每轮读取响应 `usage` 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`，逐轮打印并汇总进 `outputs/<时间戳>/summary.json` 的 `prompt_cache` 字段
 - **终止条件** LLM 自报 `done` / 达到迭代上限（默认 1000 轮）
 - LLM 的 `color` 字段支持 `cN`（账本编号，按使用频率降序）或 `#RRGGBB`，执行前自动转为 `set_colors(foreground)`
 

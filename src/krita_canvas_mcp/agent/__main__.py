@@ -11,7 +11,7 @@
 """
 import argparse
 
-from .loop import AgentLoop
+from .loop import AgentLoop, _say
 
 
 def main() -> None:
@@ -29,7 +29,10 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=None,
                         help="VLM 调用失败重试次数(默认无限；0 表示不重试)")
     parser.add_argument("--raw-output", action="store_true",
-                        help="打印 AI 原始输出文本（便于调试）")
+                        help="打印完整模型 API 返回（JSON，便于调试）")
+    parser.add_argument("--raw-input", action="store_true",
+                        help="保存并打印发往模型的完整请求 JSON"
+                             "（图片落盘到 outputs/<时间戳>/，JSON 中替换为相对路径）")
     parser.add_argument("--confirm", action="store_true",
                         help="每步执行前暂停等待用户确认（回车继续 / q 退出）")
     parser.add_argument("--enable-thinking", action="store_true",
@@ -49,16 +52,18 @@ def main() -> None:
         out_dir=args.out_dir,
         endpoint=args.endpoint or "http://127.0.0.1:5678/rpc",
         raw_output=args.raw_output,
+        raw_input=args.raw_input,
         confirm=args.confirm,
         enable_thinking=args.enable_thinking,
     )
     try:
         summary = loop.run()
-        print("=== 会话结果 ===")
+        _say("=== 会话结果 ===")
         import json
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        _say(json.dumps(summary, ensure_ascii=False, indent=2))
     except KeyboardInterrupt:
-        print("\n[agent] 用户中断。最终快照与摘要已尽量落盘(见 outputs/)。")
+        _say("[agent] 用户中断。最终快照与摘要已尽量落盘"
+             "（见 outputs/<时间戳>/）。")
 
 
 if __name__ == "__main__":

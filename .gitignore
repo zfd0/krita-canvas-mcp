@@ -27,6 +27,7 @@ htmlcov/
 *.kra
 *.kra~
 *.png.tmp
+outputs
 
 # 环境
 .env

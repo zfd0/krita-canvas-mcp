@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import time
@@ -31,6 +33,11 @@ from .vlm_client import VLMClient, VLMError, pil_to_b64
 HEATMAP_STAGES = {"C", "D"}
 
 
+def _say(msg: str) -> None:
+    """带时间戳的控制台输出（精确到秒，立即刷新）。"""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
 class AgentLoop:
     """闭环绘画循环。依赖：Krita 插件 HTTP RPC 运行中 + 任意 VLM API 可用。"""
 
@@ -41,6 +48,7 @@ class AgentLoop:
                  endpoint: str = DEFAULT_ENDPOINT,
                  max_retries: int | None = None,
                  raw_output: bool = False,
+                 raw_input: bool = False,
                  confirm: bool = False,
                  enable_thinking: bool = False):
         self.target_path = target_path
@@ -51,12 +59,15 @@ class AgentLoop:
                              model=model)
         self.max_retries = max_retries  # VLM 调用失败重试次数；None=无限
         self.system = load_system_prompt()
-        self.state = SessionState(out_dir=out_dir)
-        os.makedirs(out_dir, exist_ok=True)
+        # 产物目录：每次运行放入以时间戳命名的独立子目录 outputs/<时间戳>/
         self.session_id = time.strftime("%Y%m%d_%H%M%S")
+        self.run_dir = os.path.join(out_dir, self.session_id)
+        os.makedirs(self.run_dir, exist_ok=True)
+        self.state = SessionState(out_dir=self.run_dir)
         self.state.session_id = self.session_id  # 动作历史带会话号，便于多轮运行区分
         # 可选开关
-        self.raw_output = raw_output    # True 时打印 AI 原始响应文本
+        self.raw_output = raw_output    # True 时打印完整模型 API 返回（JSON）
+        self.raw_input = raw_input      # True 时保存并打印发往模型的完整请求
         self.confirm = confirm          # True 时每步执行前等待用户确认
         self.enable_thinking = enable_thinking  # True 时启用思考模式（Agnes 模型）
         # 提示缓存命中遥测（来自 DeepSeek usage；服务不返回时恒为 0）
@@ -69,7 +80,7 @@ class AgentLoop:
         """加载目标图；尺寸与画布不一致时对齐到画布尺寸（坐标对齐前提）。"""
         img = Image.open(self.target_path).convert("RGB")
         if (img.width, img.height) != (work_w, work_h):
-            print(f"[agent] 目标图 {img.size} 已对齐到画布尺寸 {work_w}x{work_h}"
+            _say(f"[agent] 目标图 {img.size} 已对齐到画布尺寸 {work_w}x{work_h}"
                   f"（过程重建以画布尺寸为准）")
             img = img.resize((work_w, work_h))
         return np.asarray(img, dtype=np.uint8)
@@ -82,7 +93,6 @@ class AgentLoop:
         data = self.bridge.call("get_canvas_snapshot",
                                 {"max_side": max(work_w, work_h)})
         b64 = data["image_b64"]
-        import base64
         img = Image.open(__import__("io").BytesIO(base64.b64decode(b64))).convert("RGB")
         if img.size != (work_w, work_h):
             img = img.resize((work_w, work_h))
@@ -108,8 +118,6 @@ class AgentLoop:
             try:
                 raw = self.vlm.chat(self.system, text, images, prefix=prefix,
                                     enable_thinking=enable_thinking)
-                if self.raw_output:
-                    print(f"[agent][raw] {raw}")
                 return raw
             except VLMError as e:
                 last_err = e
@@ -117,7 +125,7 @@ class AgentLoop:
                     break
                 wait = min(3 * (2 ** attempt), 60)
                 total = "无限" if max_retries is None else str(max_retries)
-                print(f"[agent] VLM 调用失败({e})，{wait}s 后重试 "
+                _say(f"[agent] VLM 调用失败({e})，{wait}s 后重试 "
                       f"({attempt + 1}/{total})")
                 time.sleep(wait)
                 attempt += 1
@@ -139,7 +147,55 @@ class AgentLoop:
         if hit or miss:
             self._cache_hit += hit
             self._cache_miss += miss
-            print(f"[agent] iter {it}: 缓存命中 {hit} / 未命中 {miss}")
+            _say(f"[agent] iter {it}: 缓存命中 {hit} / 未命中 {miss}")
+
+    @staticmethod
+    def _decode_data_url(url: str) -> tuple[str, bytes] | None:
+        """解析 data:<mime>;base64,<payload>；非 data URL 返回 None。"""
+        if not url.startswith("data:") or ";base64," not in url:
+            return None
+        head, _, payload = url.partition(";base64,")
+        try:
+            return head[len("data:"):], base64.b64decode(payload)
+        except (ValueError, TypeError):
+            return None
+
+    def _dump_request(self, it: int) -> None:
+        """保存本轮发往模型的完整请求 JSON（debug 用）。
+
+        图片从 data URL 解码落盘到本次运行目录，JSON 中的图片地址替换为该文件的
+        相对路径（相对本 JSON 所在目录），便于直接查看请求结构。
+        图片按内容哈希命名并去重：逐轮相同的目标图只保存一份。
+        """
+        req = self.vlm.last_request
+        if not req:
+            return
+        out = json.loads(json.dumps(req))  # 深拷贝，避免改动影响后续请求
+        for msg in out.get("messages", []):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if part.get("type") != "image_url":
+                    continue
+                url = (part.get("image_url") or {}).get("url", "")
+                decoded = self._decode_data_url(url)
+                if decoded is None:
+                    continue
+                mime, raw = decoded
+                ext = "jpg" if "jp" in mime else "png"
+                # 按内容哈希命名：同一张图（如每轮相同的目标图）整个运行只落盘一次，
+                # 后续轮次复用同一文件，避免重复占用磁盘
+                name = f"img_{hashlib.md5(raw).hexdigest()[:12]}.{ext}"
+                path = os.path.join(self.run_dir, name)
+                if not os.path.exists(path):
+                    with open(path, "wb") as f:
+                        f.write(raw)
+                part["image_url"]["url"] = name  # 相对路径（相对本 JSON 所在目录）
+        path = os.path.join(self.run_dir, f"request_{it:04d}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        _say(f"[agent][raw-input] 本轮请求已保存 → {path}")
 
     # ------------------------------------------------------------ 执行
 
@@ -239,7 +295,7 @@ class AgentLoop:
             doc = self.bridge.call("get_document_info", {})
         except KritaError as e:
             if str(e) == "NO_ACTIVE_DOCUMENT":
-                print("[agent] 无活动文档，自动创建与目标图同尺寸画布")
+                _say("[agent] 无活动文档，自动创建与目标图同尺寸画布")
                 from PIL import Image as _PILImage
                 target_img = _PILImage.open(self.target_path)
                 self.bridge.call("create_document", {
@@ -257,7 +313,7 @@ class AgentLoop:
         work_w, work_h = canvas_w, canvas_h  # 取消缩放：工作尺寸即画布真实尺寸
         self.canvas_w, self.canvas_h = canvas_w, canvas_h
         self.work_w, self.work_h = work_w, work_h
-        print(f"[agent] 画布 {canvas_w}x{canvas_h}（不缩放） | "
+        _say(f"[agent] 画布 {canvas_w}x{canvas_h}（不缩放） | "
               f"目标 {self.target_path} | 模型 {self.vlm.model}")
 
         # 1) 加载目标图并对齐
@@ -283,7 +339,7 @@ class AgentLoop:
             try:
                 canvas_arr, snap_data = self._snapshot_rgb(work_w, work_h)
             except KritaError as e:
-                print(f"[agent] 快照失败: {e}，5s 后重试")
+                _say(f"[agent] 快照失败: {e}，5s 后重试")
                 time.sleep(5)
                 continue
             metrics = CanvasMetrics(target_arr, canvas_arr)
@@ -337,19 +393,24 @@ class AgentLoop:
                 raw = self._ask(text, images, prefix=prefix,
                                 enable_thinking=self.enable_thinking)
                 self._track_cache(it)
+                if self.raw_input:
+                    self._dump_request(it)
+                if self.raw_output:
+                    _say("[agent][raw] 模型 API 完整返回: "
+                         + json.dumps(self.vlm.last_response, ensure_ascii=False))
                 action = parse_action(raw)
             except ParseError as e:
                 feedback = [str(e), "请严格输出单一 JSON 对象"]
                 self._log(it, self.state.stage, "parse_error",
                           {"err": str(e)[:120]}, "", False, 0)
-                print(f"[agent] iter {it}: 输出解析失败 - {e}")
+                _say(f"[agent] iter {it}: 输出解析失败 - {e}")
                 continue
             except VLMError as e:
                 # _ask 内部已退避重试；到这表示连续多轮 API 不可用
                 vlm_fail_streak += 1
                 self._log(it, self.state.stage, "vlm_error",
                           {"err": str(e)[:120]}, "", False, 0)
-                print(f"[agent] iter {it}: VLM 连续失败 {vlm_fail_streak} 次 - {e}")
+                _say(f"[agent] iter {it}: VLM 连续失败 {vlm_fail_streak} 次 - {e}")
                 if vlm_fail_streak >= 3:
                     stop_reason = "vlm_failed"
                     break
@@ -365,10 +426,10 @@ class AgentLoop:
             if self.confirm and kind not in ("plan", "next_stage", "done"):
                 tool = action.get("tool", "?")
                 thought = action.get("thought", "")
-                print(f"\n[agent] iter {it} [{self.state.stage}] 下一步: {tool}")
+                _say(f"\n[agent] iter {it} [{self.state.stage}] 下一步: {tool}")
                 if thought:
-                    print(f"  理由: {thought}")
-                print(f"  参数: {json.dumps(action.get('params', {}), ensure_ascii=False)}")
+                    _say(f"  理由: {thought}")
+                _say(f"  参数: {json.dumps(action.get('params', {}), ensure_ascii=False)}")
                 try:
                     ans = input("[agent] 继续？(回车继续 / q 退出) ").strip().lower()
                 except EOFError:
@@ -384,7 +445,7 @@ class AgentLoop:
                                 "请先输出 plan"]
                     self._log(it, "O", "done_reject", {},
                               action.get("thought", ""), False, 0)
-                    print(f"[agent] iter {it}: 拒绝 done（仍处于 O 阶段）")
+                    _say(f"[agent] iter {it}: 拒绝 done（仍处于 O 阶段）")
                     continue
                 stop_reason = "llm_done"
                 self._log(it, self.state.stage, "done", {}, action.get("thought", ""), True, 0)
@@ -396,20 +457,20 @@ class AgentLoop:
                     feedback = [f"⚠ plan 只能在 O 计划阶段输出！当前 stage="
                                 f"{self.state.stage}，必须输出绘画工具动作。"]
                     self._log(it, self.state.stage, "plan_reject", {}, "", False, 0)
-                    print(f"[agent] iter {it}: 拒绝 plan（当前 {self.state.stage} 阶段）")
+                    _say(f"[agent] iter {it}: 拒绝 plan（当前 {self.state.stage} 阶段）")
                     continue
                 regions = action.get("regions", [])
                 if 3 <= len(regions) <= 8:
                     self.state.plan = action
                     self._log(it, "O", "plan", {"regions": len(regions)},
                               action.get("thought", ""), True, 0)
-                    print(f"[agent] iter {it}: plan 已就绪 - "
+                    _say(f"[agent] iter {it}: plan 已就绪 - "
                           f"{action.get('composition', '')[:40]}")
                 else:
                     feedback = [f"plan regions 数量必须为 3~8（当前 {len(regions)}）"]
                     self._log(it, "O", "plan_reject", {"regions": len(regions)},
                               action.get("thought", ""), False, 0)
-                    print(f"[agent] iter {it}: plan 被拒 - regions 数量 {len(regions)}")
+                    _say(f"[agent] iter {it}: plan 被拒 - regions 数量 {len(regions)}")
                 continue
 
             if kind == "next_stage":
@@ -421,12 +482,12 @@ class AgentLoop:
                     self._log(it, self.state.stage, "next_stage",
                               {"from": action.get("from", ""), "to": action.get("to", ""),
                                "err": err_}, "", False, 0)
-                    print(f"[agent] iter {it}: 阶段切换被拒 - {err_}")
+                    _say(f"[agent] iter {it}: 阶段切换被拒 - {err_}")
                     continue
                 self.state.stage = action["to"]
                 self.state.plan["stage_goals_cur"] = action.get("stage_goals", [])
                 self.state.plan["open_issues"] = action.get("open_issues", [])
-                print(f"[agent] iter {it}: {action['from']}→{action['to']} "
+                _say(f"[agent] iter {it}: {action['from']}→{action['to']} "
                       f"({STAGE_NAMES.get(action['to'], '')})")
                 self._log(it, action["to"], "next_stage", action, action.get("thought", ""), True, 0)
                 continue
@@ -442,7 +503,7 @@ class AgentLoop:
                 feedback = [err_]
                 self._log(it, self.state.stage, tool, {"err": err_},
                           action.get("thought", ""), False, 0)
-                print(f"[agent] iter {it}: 硬约束拒绝 - {err_}")
+                _say(f"[agent] iter {it}: 硬约束拒绝 - {err_}")
                 continue
             if stage_decl != self.state.stage:
                 feedback = [f"声明的 stage={stage_decl} 与服务端当前 {self.state.stage} 不符，用后者"]
@@ -453,7 +514,7 @@ class AgentLoop:
                 feedback = [f"工具执行失败: {e.message}"]
                 self._log(it, self.state.stage, tool, self._digest(action),
                           action.get("thought", ""), False, 0)
-                print(f"[agent] iter {it}: 执行失败 - {e.message}")
+                _say(f"[agent] iter {it}: 执行失败 - {e.message}")
                 continue
 
             self._log(it, self.state.stage, tool, res["digest"],
@@ -464,7 +525,7 @@ class AgentLoop:
                     sample_result = res["result"]
                 except Exception:
                     pass
-            print(f"[agent] iter {it}: {tool} ok ({res['elapsed_ms']}ms) "
+            _say(f"[agent] iter {it}: {tool} ok ({res['elapsed_ms']}ms) "
                   f"painted={painted:.3f} cov={cov:.3f} de={scalars['delta_e_mean']}")
 
         # 3) 收尾：保存结果
@@ -487,8 +548,7 @@ class AgentLoop:
             canvas_arr, snap_data = self._snapshot_rgb(int(doc["width"]),
                                                        int(doc["height"]))
             final_img = Image.fromarray(canvas_arr, "RGB")
-            final_path = os.path.join(self.out_dir,
-                                      f"final_{self.session_id}.png")
+            final_path = os.path.join(self.run_dir, "final.png")
             final_img.save(final_path)
         except Exception:
             traceback.print_exc()
@@ -510,10 +570,9 @@ class AgentLoop:
             "final_image_path": final_path,
             "target_path": self.target_path,
         }
-        meta_path = os.path.join(self.out_dir,
-                                 f"summary_{self.session_id}.json")
+        meta_path = os.path.join(self.run_dir, "summary.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
-        print(f"[agent] 完成: stop_reason={reason} "
-              f"iterations={self.state.iteration} 摘要→{meta_path}")
+        _say(f"[agent] 完成: stop_reason={reason} "
+              f"iterations={self.state.iteration} 产物目录→{self.run_dir}")
         return summary

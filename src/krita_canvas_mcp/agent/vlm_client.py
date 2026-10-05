@@ -84,6 +84,10 @@ class VLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._client = httpx.Client(timeout=timeout)
+        # 最近一次请求体（含图片 data URL），供 debug 落盘
+        self.last_request: dict = {}
+        # 最近一次完整响应，供 debug 打印
+        self.last_response: dict = {}
         # 最近一次成功请求的 usage（含 DeepSeek 提示缓存命中字段），供遥测读取
         self.last_usage: dict = {}
 
@@ -131,6 +135,7 @@ class VLMClient:
         if enable_thinking and "agnes" in self.model.lower():
             body["chat_template_kwargs"] = {"enable_thinking": True}
 
+        self.last_request = body  # 供 debug 落盘完整请求
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
             resp = self._client.post(
@@ -145,6 +150,7 @@ class VLMClient:
             raise VLMError(f"VLM HTTP {resp.status_code}: {resp.text[:300]}")
 
         data = resp.json()
+        self.last_response = data  # 供 debug 打印完整返回
         self.last_usage = data.get("usage") or {}
         try:
             return data["choices"][0]["message"]["content"]
