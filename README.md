@@ -97,7 +97,8 @@ python -m krita_canvas_mcp --transport streamable-http --port 8765
   - B：禁止填充；笔刷 ≤3px；仅允许灰/蓝色
   - C：禁止半透明叠色（opacity < 0.9）
   - D：建议实色（opacity ≥ 0.9）
-- **上下文装配** 每轮全量给：目标图 + 画布快照 + 热力图（C/D 阶段）+ 会话状态 + 颜色账本（c1..cN）+ 近 5 步动作 + 区域进度
+- **上下文装配** 按字节稳定性分段以命中 LLM 前缀缓存：**稳定文本前缀**（stage/plan，置于图像之前）→ 目标图 + 画布快照 + 热力图（C/D 阶段）→ **变化文本后缀**（iter 计数 + 颜色账本（c1..cN）+ 近 5 步动作 + 区域进度 + 采样/反馈）
+- **缓存遥测** 每轮读取响应 `usage` 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`，逐轮打印并汇总进 `outputs/summary_<session>.json` 的 `prompt_cache` 字段
 - **终止条件** LLM 自报 `done` / 达到迭代上限（默认 1000 轮）
 - LLM 的 `color` 字段支持 `cN`（账本编号，按使用频率降序）或 `#RRGGBB`，执行前自动转为 `set_colors(foreground)`
 

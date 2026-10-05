@@ -59,6 +59,9 @@ class AgentLoop:
         self.raw_output = raw_output    # True 时打印 AI 原始响应文本
         self.confirm = confirm          # True 时每步执行前等待用户确认
         self.enable_thinking = enable_thinking  # True 时启用思考模式（Agnes 模型）
+        # 提示缓存命中遥测（来自 DeepSeek usage；服务不返回时恒为 0）
+        self._cache_hit = 0
+        self._cache_miss = 0
 
     # ------------------------------------------------------------ 初始化
 
@@ -87,11 +90,12 @@ class AgentLoop:
 
     # ------------------------------------------------------------ LLM 交互
 
-    def _ask(self, text: str, images: list[dict],
+    def _ask(self, text: str, images: list[dict], prefix: str = "",
              max_retries: int | None = None,
              enable_thinking: bool = False) -> str:
         """调 VLM 取回原始文本。
 
+        prefix: 稳定文本前缀，置于图像之前以命中前缀缓存。
         max_retries: None=无限重试(缺省用 self.max_retries)；0=不重试；N=最多重试 N 次。
         API 错误按指数退避重试（3s、6s、…封顶 60s），重试耗尽后抛 VLMError。
         enable_thinking: 是否启用思考模式（Agnes 模型专用）
@@ -102,7 +106,8 @@ class AgentLoop:
         last_err: VLMError | None = None
         while True:
             try:
-                raw = self.vlm.chat(self.system, text, images, enable_thinking=enable_thinking)
+                raw = self.vlm.chat(self.system, text, images, prefix=prefix,
+                                    enable_thinking=enable_thinking)
                 if self.raw_output:
                     print(f"[agent][raw] {raw}")
                 return raw
@@ -118,6 +123,23 @@ class AgentLoop:
                 attempt += 1
         assert last_err is not None
         raise last_err
+
+    def _track_cache(self, it: int) -> None:
+        """读取最近一次 VLM 响应 usage，累计并打印提示缓存命中情况。
+
+        DeepSeek 在 usage 中返回 prompt_cache_hit_tokens / prompt_cache_miss_tokens；
+        其他服务（如 GLM）不返回时按 0 计且不打印，保证兼容。
+        """
+        usage = self.vlm.last_usage or {}
+        try:
+            hit = int(usage.get("prompt_cache_hit_tokens") or 0)
+            miss = int(usage.get("prompt_cache_miss_tokens") or 0)
+        except (TypeError, ValueError):
+            return
+        if hit or miss:
+            self._cache_hit += hit
+            self._cache_miss += miss
+            print(f"[agent] iter {it}: 缓存命中 {hit} / 未命中 {miss}")
 
     # ------------------------------------------------------------ 执行
 
@@ -297,21 +319,24 @@ class AgentLoop:
                 images.append({"image_b64": hm_b64, "mime": "image/png"})
 
             # ---- 装配上下文 → LLM ----
+            # 拆为「稳定前缀（图像之前，可命中前缀缓存）」+「变化后缀（图像之后）」
             if self.state.stage == "O" and not self.state.plan:
-                # O 计划阶段：plan 未就绪时用 plan 专用提示（附上轮修正要求）
-                text = build_plan_prompt(work_w, work_h)
-                if feedback:
-                    text += ("\n⚠ 上轮输出的修正要求：\n"
-                             + "\n".join(f"  - {f}" for f in feedback))
+                # O 计划阶段：plan 专用提示（画布尺寸恒定 → 全段稳定，整体前置），
+                # 仅反馈随轮变化，放到图像之后
+                prefix = build_plan_prompt(work_w, work_h)
+                text = ("\n⚠ 上轮输出的修正要求：\n"
+                        + "\n".join(f"  - {f}" for f in feedback)) if feedback else ""
             else:
-                text = build_user_text(
+                prefix, text = build_user_text(
                     self.state, scalars, cov, region_rows,
                     feedback=feedback, sample_result=sample_result,
                     painted=painted, primary=primary, stage_note=stage_note,
                 )
             feedback, sample_result = [], None
             try:
-                raw = self._ask(text, images, enable_thinking=self.enable_thinking)
+                raw = self._ask(text, images, prefix=prefix,
+                                enable_thinking=self.enable_thinking)
+                self._track_cache(it)
                 action = parse_action(raw)
             except ParseError as e:
                 feedback = [str(e), "请严格输出单一 JSON 对象"]
@@ -469,11 +494,17 @@ class AgentLoop:
             traceback.print_exc()
             snap_data, final_path = {}, None
 
+        cache_total = self._cache_hit + self._cache_miss
         summary = {
             "session_id": self.session_id,
             "stop_reason": reason,
             "iterations": self.state.iteration,
             "metrics": scalars,
+            "prompt_cache": {
+                "hit_tokens": self._cache_hit,
+                "miss_tokens": self._cache_miss,
+                "hit_rate": round(self._cache_hit / cache_total, 4) if cache_total else 0.0,
+            },
             "stage_breakdown": dict(self.state.stage_actions),
             "history_count": len(self.state.history),
             "final_image_path": final_path,

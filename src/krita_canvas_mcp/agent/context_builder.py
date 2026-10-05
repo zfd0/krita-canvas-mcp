@@ -1,7 +1,8 @@
 """上下文装配 + LLM 输出解析（docs/草稿.txt 第二/三/四节契约）。
 
 - parse_action: 解析 LLM 输出为动作 dict（plan/next_stage/done 或工具调用）。
-- build_user_text: 按第四节模板装配每轮文本上下文。
+- build_user_text: 装配每轮文本上下文，拆为 (stable_prefix, volatile_suffix) 两段，
+  稳定段置于图像之前以命中 LLM 前缀缓存，变化段置于图像之后。
 
 系统提示词已迁至 prompts.py（单一来源），此处不再持有。
 """
@@ -162,8 +163,15 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
                     feedback: list | None = None,
                     sample_result: dict | None = None,
                     painted: float = 0.0, primary: str = "matched",
-                    stage_note: str | None = None) -> str:
-    """每轮文本上下文装配（草稿第四节模板）。
+                    stage_note: str | None = None) -> tuple[str, str]:
+    """每轮文本上下文装配，返回 (stable_prefix, volatile_suffix)。
+
+    为提升 LLM 前缀缓存命中率，按「字节稳定性」拆段：
+    - stable_prefix: 同一阶段内逐轮字节一致的内容（stage + plan），置于图像
+      之前，可被前缀缓存命中（stage/plan 仅在 next_stage 时变）。
+    - volatile_suffix: 每轮变化的内容（iteration/账本/近 5 步/进度/采样/反馈），
+      置于图像之后。
+
     :param state:     SessionState
     :param metrics:   CanvasMetrics.scalars() + covered
     :param cov:       全图匹配度（ΔE<6 占比）
@@ -173,18 +181,24 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
     :param feedback:  上一轮被拒原因/提示，注入本轮
     :param stage_note: 阶段提示（O 阶段切换 / 动作数达标）
     """
+    p = state.plan or {}
+
+    # ---- 稳定前缀：stage + plan（置于图像之前，供前缀缓存命中）----
+    plines = ["--- 阶段与计划（固定）---", f"stage: {state.stage}"]
+    if p:
+        plines.append(f"plan 构图: {p.get('composition', '')}")
+        rids = " ".join(r["id"] + r.get("name", "") for r in p.get("regions", []))
+        plines.append(f"plan regions: {rids}")
+        if p.get("risks"):
+            plines.append(f"plan risks: {p['risks']}")
+    if p.get("stage_goals_cur"):
+        plines.append(f"stage_goals: {p['stage_goals_cur']}")
+    prefix = "\n".join(plines)
+
+    # ---- 变化后缀：每轮都在变的内容（置于图像之后）----
     lines = []
     lines.append("--- 会话状态 ---")
-    lines.append(f"stage: {state.stage}    iteration: {state.iteration}")
-    p = state.plan or {}
-    if p:
-        lines.append(f"plan 构图: {p.get('composition', '')}")
-        rids = " ".join(r["id"] + r.get("name", "") for r in p.get("regions", []))
-        lines.append(f"plan regions: {rids}")
-        if p.get("risks"):
-            lines.append(f"plan risks: {p['risks']}")
-    if p.get("stage_goals_cur"):
-        lines.append(f"stage_goals: {p['stage_goals_cur']}")
+    lines.append(f"iteration: {state.iteration}")
 
     lines.append("")
     lines.append("--- 颜色账本（按使用频率）---")
@@ -220,4 +234,4 @@ def build_user_text(state, metrics: dict, cov: float, regions_rows: list,
 
     lines.append("")
     lines.append("请输出本轮动作 JSON（一个对象，声明 stage）。")
-    return "\n".join(lines)
+    return prefix, "\n".join(lines)

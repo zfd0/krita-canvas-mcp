@@ -84,6 +84,8 @@ class VLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._client = httpx.Client(timeout=timeout)
+        # 最近一次成功请求的 usage（含 DeepSeek 提示缓存命中字段），供遥测读取
+        self.last_usage: dict = {}
 
     @property
     def endpoint(self) -> str:
@@ -96,17 +98,24 @@ class VLMClient:
                 "image_url": {"url": f"data:{mime};base64,{image_b64}"}}
 
     def chat(self, system: str, text: str, images: list[dict] | None = None,
-             enable_thinking: bool = False) -> str:
+             prefix: str = "", enable_thinking: bool = False) -> str:
         """一次多模态对话。
         :param system: system prompt
-        :param text:   用户文本（会话状态+指令）
+        :param text:   用户文本（每轮变化的后缀：会话状态+指令）
         :param images: [{"image_b64": ..., "mime": ...}, ...] 按序插入文本前
+        :param prefix: 稳定文本前缀，置于图像之前（提升前缀缓存命中率）
         :param enable_thinking: 是否启用思考模式（Agnes 模型专用）
         :return: assistant 文本内容
         """
-        content = [self._image_part(im["image_b64"], im.get("mime", "image/png"))
-                   for im in (images or [])]
-        content.append({"type": "text", "text": text})
+        content = []
+        if prefix:
+            # 稳定前缀置于图像之前：是唯一可命中前缀缓存的部分
+            content.append({"type": "text", "text": prefix})
+        content += [self._image_part(im["image_b64"], im.get("mime", "image/png"))
+                    for im in (images or [])]
+        if text:
+            # O 阶段无反馈时可能为空串，跳过空文本块以免部分服务拒收
+            content.append({"type": "text", "text": text})
 
         messages = [
             {"role": "system", "content": system},
@@ -136,6 +145,7 @@ class VLMClient:
             raise VLMError(f"VLM HTTP {resp.status_code}: {resp.text[:300]}")
 
         data = resp.json()
+        self.last_usage = data.get("usage") or {}
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
