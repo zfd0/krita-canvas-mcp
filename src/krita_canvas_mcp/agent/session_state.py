@@ -244,6 +244,33 @@ class CanvasMetrics:
 
 # ---------------------------------------------------------------- 颜色账本
 
+def norm_color_token(value) -> str | None:
+    """把模型给出的 color 字段归一化为可解析的令牌字符串。
+
+    兼容多种写法：'#RRGGBB' / 'cN' / [r,g,b] / [[r,g,b]] / {'r':..,'g':..,'b':..}。
+    归一化后统一交给上层做 resolve/校验，避免 list/dict 直接进入字符串处理而崩溃。
+    无法识别时返回 None（由上层按“无颜色”或报错处理）。
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    nums = None
+    if isinstance(value, (list, tuple)):
+        nums = list(value)
+        if len(nums) == 1 and isinstance(nums[0], (list, tuple)):
+            nums = list(nums[0])
+    elif isinstance(value, dict):
+        nums = [value.get("r"), value.get("g"), value.get("b")]
+    if nums is not None and len(nums) >= 3:
+        try:
+            r, g, b = (int(round(float(nums[i]))) for i in range(3))
+        except (TypeError, ValueError):
+            return None
+        return "#%02X%02X%02X" % (max(0, min(255, r)),
+                                  max(0, min(255, g)),
+                                  max(0, min(255, b)))
+    return None
+
+
 @dataclass
 class ColorLedger:
     """颜色账本：登记每个使用过的颜色及次数，输出 c1..cN 编号(按频率降序)。"""
@@ -260,15 +287,21 @@ class ColorLedger:
             return color.upper()
         return ""
 
-    def resolve(self, token: str) -> str | None:
-        """把 'c3' / '#AABBCC' 解析为 hex；无法解析返回 None。"""
-        if not token:
+    def resolve(self, token) -> str | None:
+        """把 'c3' / '#AABBCC' / RGB 列表 解析为 hex；无法解析返回 None。"""
+        t = norm_color_token(token)
+        if not t:
             return None
-        t = token.strip()
         if t.startswith("#"):
-            return t.upper()
-        if t.lower().startswith("c") and t[1:].isdigit():
-            idx = int(t[1:])
+            h = t[1:]
+            if len(h) == 3:
+                h = "".join(c * 2 for c in h)
+            if len(h) == 6 and all(c in "0123456789abcdefABCDEF" for c in h):
+                return "#" + h.upper()
+            return None
+        low = t.lower()
+        if low.startswith("c") and low[1:].isdigit():
+            idx = int(low[1:])
             ranked = sorted(self._usage.items(), key=lambda kv: -kv[1])
             if 1 <= idx <= len(ranked):
                 return ranked[idx - 1][0]

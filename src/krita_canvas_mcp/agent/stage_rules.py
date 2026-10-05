@@ -32,6 +32,14 @@ def _grayish(hexv: str) -> bool:
     return False
 
 
+def _as_float(v):
+    """尽力把参数值转为 float；不可转时返回 None（交由下游执行期报错，避免校验崩溃）。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _check_a(tool: str, params: dict, color: str | None):
     if tool in ("paint_path", "paint_shape") and \
             params.get("fill_style") not in (None, "None"):
@@ -39,17 +47,18 @@ def _check_a(tool: str, params: dict, color: str | None):
                        "（paint_path 的 fill_style 必须为 None）")
     if color and not _grayish(color):
         return False, "STAGE_A_GRAY_ONLY: 草图阶段仅允许灰/蓝色"
+    size = _as_float(params.get("size"))
     if tool in ("set_brush_params", "paint_path", "paint_line") \
             and params.get("size") is not None \
-            and not (4 <= float(params["size"]) <= 12):
+            and size is not None and not (4 <= size <= 12):
         return False, "STAGE_A_BRUSH_SIZE: 草图阶段笔刷 size 应为 4~12"
     return True, None
 
 
 def _check_b(tool: str, params: dict, color: str | None):
+    size = _as_float(params.get("size"))
     if tool in ("set_brush_params", "paint_path", "paint_line") \
-            and params.get("size") is not None \
-            and float(params["size"]) > 3:
+            and size is not None and size > 3:
         return False, "STAGE_B_TOO_THICK: 线稿阶段笔刷 size 应 ≤3"
     if tool in ("paint_path", "paint_shape") and \
             params.get("fill_style") not in (None, "None"):
@@ -60,15 +69,15 @@ def _check_b(tool: str, params: dict, color: str | None):
 
 
 def _check_c(tool: str, params: dict, color: str | None):
-    if tool == "set_brush_params" and params.get("opacity") is not None \
-            and float(params["opacity"]) < 0.9:
+    op = _as_float(params.get("opacity"))
+    if tool == "set_brush_params" and op is not None and op < 0.9:
         return False, "STAGE_C_TRANSPARENT: 填色阶段禁止半透明叠色(opacity<0.9)"
     return True, None
 
 
 def _check_d(tool: str, params: dict, color: str | None):
-    if tool == "set_brush_params" and params.get("opacity") is not None \
-            and float(params["opacity"]) < 0.9:
+    op = _as_float(params.get("opacity"))
+    if tool == "set_brush_params" and op is not None and op < 0.9:
         return False, "STAGE_D_SOLID: 光影阶段建议实色"
     return True, None
 

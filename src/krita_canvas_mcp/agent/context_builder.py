@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import re
 
+from .session_state import norm_color_token
+
 
 class ParseError(Exception):
     """LLM 输出无法解析为合法动作。"""
@@ -119,16 +121,21 @@ def parse_action(text: str) -> dict:
     if not isinstance(obj, dict):
         raise ParseError("输出必须是 JSON 对象")
     obj.setdefault("thought", "")
-    if "action" in obj:
-        # plan 动作：规范化 regions 的 bbox，避免下游按 [x,y,w,h] 解包崩溃
-        if obj.get("action") == "plan" and isinstance(obj.get("regions"), list):
-            for r in obj["regions"]:
-                if isinstance(r, dict) and "bbox" in r:
-                    r["bbox"] = _norm_bbox(r["bbox"])
-        return obj
+    # 工具调用分支优先：模型常同时给出 tool/params 与 "action":"draw"，
+    # 若先命中 "action" 分支提前返回，会跳过 points/color 等参数归一化，
+    # 导致下游拿到 list 型 color 等而崩溃。
     if "tool" in obj and "params" in obj:
+        if not isinstance(obj.get("tool"), str) or not obj["tool"]:
+            raise ParseError("tool 必须是非空字符串")
         if not isinstance(obj["params"], dict):
             raise ParseError("params 必须是对象")
+        # 归一化 color：兼容 [r,g,b] / {"r":..,"g":..,"b":..} / '#hex' / 'cN'，
+        # 避免 list/dict 进入账本 resolve 的字符串处理而崩溃
+        if "color" in obj:
+            obj["color"] = norm_color_token(obj["color"])
+        # stage 必须是字符串，非字符串则丢弃，由下游按服务端当前阶段处理
+        if "stage" in obj and not isinstance(obj["stage"], str):
+            obj.pop("stage")
         # 规范化 points 格式（兼容 {"x", "y"} 字典）
         if "points" in obj["params"]:
             try:
@@ -142,6 +149,25 @@ def parse_action(text: str) -> dict:
         # 移除无效的 node_id（null 或不存在的节点）
         if obj["params"].get("node_id") is None or obj["params"].get("node_id") == "":
             obj["params"].pop("node_id", None)
+        return obj
+    if "action" in obj:
+        # plan 动作：校验/规范化 regions，避免下游按 [x,y,w,h] 解包或取字段崩溃
+        if obj.get("action") == "plan":
+            regions = obj.get("regions")
+            if not isinstance(regions, list):
+                raise ParseError("plan 必须包含 regions 数组")
+            for i, r in enumerate(regions):
+                if not isinstance(r, dict):
+                    raise ParseError("plan regions 的每一项必须是对象 {id,name,bbox}")
+                # 强制 id/name 为非空字符串：模型可能给出 null/数字，若原样保留，
+                # 下游 build_user_text 的 r["id"] + r["name"] 与 r['name'][:6] 会抛
+                # TypeError，直接中断闭环
+                rid = r.get("id")
+                r["id"] = str(rid) if rid not in (None, "") else f"r{i + 1}"
+                name = r.get("name")
+                r["name"] = str(name) if name not in (None, "") else ""
+                if "bbox" in r:
+                    r["bbox"] = _norm_bbox(r["bbox"])
         return obj
     raise ParseError(f"缺少 action 或 tool 字段: {json.dumps(obj, ensure_ascii=False)[:200]}")
 

@@ -24,7 +24,8 @@ from ..errors import ErrCode, KritaError
 from ..prompts import load_system_prompt
 from .context_builder import (ParseError, build_plan_prompt, build_user_text,
                               parse_action)
-from .session_state import ActionRecord, CanvasMetrics, SessionState
+from .session_state import (ActionRecord, CanvasMetrics, SessionState,
+                            norm_color_token)
 from .stage_rules import (MIN_ACTIONS, STAGE_NAMES, STAGE_SEQ, validate,
                           validate_next_stage)
 from .vlm_client import VLMClient, VLMError, pil_to_b64
@@ -200,20 +201,28 @@ class AgentLoop:
     # ------------------------------------------------------------ 执行
 
     def _digest(self, action: dict) -> dict:
-        """动作参数 → 轻量摘要（历史展示用，不带完整点列）。"""
+        """动作参数 → 轻量摘要（历史展示用，不带完整点列）。
+
+        对模型输出的畸形参数做容错：类型不符时返回能提取到的部分，绝不抛异常。
+        """
         params = action.get("params", {})
+        if not isinstance(params, dict):
+            return {}
         d = {}
-        if "points" in params:
-            pts = params["points"]
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            d["points_count"] = len(pts)
-            d["bbox"] = [int(min(xs)), int(min(ys)),
-                         int(max(xs) - min(xs)), int(max(ys) - min(ys))]
-        if "size" in params:
-            d["size"] = params["size"]
-        if "preset_name" in params:
-            d["preset"] = params["preset_name"]
+        try:
+            if "points" in params:
+                pts = params["points"]
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                d["points_count"] = len(pts)
+                d["bbox"] = [int(min(xs)), int(min(ys)),
+                             int(max(xs) - min(xs)), int(max(ys) - min(ys))]
+            if "size" in params:
+                d["size"] = params["size"]
+            if "preset_name" in params:
+                d["preset"] = params["preset_name"]
+        except (TypeError, ValueError, IndexError, KeyError, AttributeError):
+            pass
         return d
 
     def _sample_target(self, x: int, y: int, radius: int = 0,
@@ -256,15 +265,24 @@ class AgentLoop:
 
         # 2) 笔刷尺寸落地：paint_* 直接携带 size 时先设置笔刷
         if tool in ("paint_path", "paint_line", "paint_shape") and "size" in params:
-            self.bridge.call("set_brush_params", {"size": float(params["size"])})
+            try:
+                size_f = float(params["size"])
+            except (TypeError, ValueError):
+                raise KritaError(ErrCode.INVALID_PARAM,
+                                 f"size 必须为数字，得到 {params['size']!r}")
+            self.bridge.call("set_brush_params", {"size": size_f})
             executed.append(("set_brush_size", params["size"]))
 
         # 3) 主工具：target 采样走本地；绘画工具坐标还原到画布真实尺寸
         t0 = time.time()
         if tool == "sample_color" and params.get("source", "target") == "target":
-            result = self._sample_target(
-                int(params.get("x", 0)), int(params.get("y", 0)),
-                int(params.get("radius", 0)), params.get("reduce", "median"))
+            try:
+                sx, sy = int(params.get("x", 0)), int(params.get("y", 0))
+                srad = int(params.get("radius", 0))
+            except (TypeError, ValueError):
+                raise KritaError(ErrCode.INVALID_PARAM,
+                                 "sample_color 的 x/y/radius 必须为整数")
+            result = self._sample_target(sx, sy, srad, params.get("reduce", "median"))
             # 采样色自动设为前景色：模型可直接绘制（省略 color 字段），
             # 避免“采样到蓝色却用旧色 c1(草稿灰) 下笔”这类串色问题
             hexv = (result.get("color") or {}).get("srgb_hex")
@@ -294,7 +312,14 @@ class AgentLoop:
         try:
             doc = self.bridge.call("get_document_info", {})
         except KritaError as e:
-            if str(e) == "NO_ACTIVE_DOCUMENT":
+            # 无活动文档的判定需同时兼容两种表达：插件直接 raise
+            # RuntimeError("NO_ACTIVE_DOCUMENT")（message 为空时 dispatcher 会把它
+            # 降级为 IO_ERROR + message="NO_ACTIVE_DOCUMENT"），或带说明的
+            # "NO_ACTIVE_DOCUMENT: xxx"（err_code=NO_ACTIVE_DOCUMENT、message=中文）。
+            # 只比对 str(e) 会在带说明时漏判 → 直接 raise 使闭环启动即中断。
+            no_doc = (getattr(e, "code", None) == ErrCode.NO_ACTIVE_DOCUMENT
+                      or "NO_ACTIVE_DOCUMENT" in str(e))
+            if no_doc:
                 _say("[agent] 无活动文档，自动创建与目标图同尺寸画布")
                 from PIL import Image as _PILImage
                 target_img = _PILImage.open(self.target_path)
@@ -340,6 +365,12 @@ class AgentLoop:
                 canvas_arr, snap_data = self._snapshot_rgb(work_w, work_h)
             except KritaError as e:
                 _say(f"[agent] 快照失败: {e}，5s 后重试")
+                time.sleep(5)
+                continue
+            except Exception as e:
+                # 非 RPC 错误（base64 解码失败、返回结构缺字段等）同样降级重试，
+                # 否则单帧异常会直接冒泡中断整个闭环
+                _say(f"[agent] 快照解析失败({type(e).__name__}): {e}，5s 后重试")
                 time.sleep(5)
                 continue
             metrics = CanvasMetrics(target_arr, canvas_arr)
@@ -389,12 +420,20 @@ class AgentLoop:
                     painted=painted, primary=primary, stage_note=stage_note,
                 )
             feedback, sample_result = [], None
+            # 请求前先输出一行：网络阻塞时（DNS/连接挂起）能立刻定位卡点，
+            # 否则控制台会长时间无任何输出，看起来像“死掉”
+            _say(f"[agent] iter {it} [{self.state.stage}]: 请求模型…"
+                  f"（{len(images)} 张图，超时 {self.vlm._client.timeout.read:g}s）")
             try:
                 raw = self._ask(text, images, prefix=prefix,
                                 enable_thinking=self.enable_thinking)
                 self._track_cache(it)
                 if self.raw_input:
-                    self._dump_request(it)
+                    try:
+                        self._dump_request(it)
+                    except Exception as e:
+                        # 调试落盘失败（磁盘/权限等）不应中断闭环
+                        _say(f"[agent][raw-input] 请求落盘失败: {e}")
                 if self.raw_output:
                     _say("[agent][raw] 模型 API 完整返回: "
                          + json.dumps(self.vlm.last_response, ensure_ascii=False))
@@ -494,27 +533,35 @@ class AgentLoop:
 
             # 普通工具调用
             tool = action.get("tool")
-            stage_decl = action.get("stage", self.state.stage)
-            color_token = action.get("color")
-            ok_, err_ = validate(stage_decl, tool, action.get("params", {}),
-                                 self.state.ledger.resolve(color_token) if color_token else None,
-                                 color_token=color_token)
-            if not ok_:
-                feedback = [err_]
-                self._log(it, self.state.stage, tool, {"err": err_},
-                          action.get("thought", ""), False, 0)
-                _say(f"[agent] iter {it}: 硬约束拒绝 - {err_}")
-                continue
-            if stage_decl != self.state.stage:
-                feedback = [f"声明的 stage={stage_decl} 与服务端当前 {self.state.stage} 不符，用后者"]
-
             try:
+                stage_decl = action.get("stage", self.state.stage)
+                color_token = norm_color_token(action.get("color"))
+                ok_, err_ = validate(
+                    stage_decl, tool, action.get("params", {}),
+                    self.state.ledger.resolve(color_token) if color_token else None,
+                    color_token=color_token)
+                if not ok_:
+                    feedback = [err_]
+                    self._log(it, self.state.stage, tool, {"err": err_},
+                              action.get("thought", ""), False, 0)
+                    _say(f"[agent] iter {it}: 硬约束拒绝 - {err_}")
+                    continue
+                if stage_decl != self.state.stage:
+                    feedback = [f"声明的 stage={stage_decl} 与服务端当前 "
+                                f"{self.state.stage} 不符，用后者"]
                 res = self._execute(action)
             except KritaError as e:
                 feedback = [f"工具执行失败: {e.message}"]
                 self._log(it, self.state.stage, tool, self._digest(action),
                           action.get("thought", ""), False, 0)
                 _say(f"[agent] iter {it}: 执行失败 - {e.message}")
+                continue
+            except Exception as e:
+                # 模型输出类型异常等未预期错误 → 转成反馈重试，避免中断闭环
+                feedback = [f"动作处理异常({type(e).__name__}): {e}；请检查参数类型"]
+                self._log(it, self.state.stage, str(tool), {},
+                          action.get("thought", ""), False, 0)
+                _say(f"[agent] iter {it}: 动作处理异常 - {type(e).__name__}: {e}")
                 continue
 
             self._log(it, self.state.stage, tool, res["digest"],
